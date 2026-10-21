@@ -18,6 +18,8 @@ class PostgresStore(private val url: String) : Store {
             s.execute("CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY,phone TEXT,access_token TEXT,refresh_token TEXT,expires_at TEXT)")
             s.execute("CREATE TABLE IF NOT EXISTS otps(phone TEXT PRIMARY KEY,code TEXT)")
             s.execute("CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,from_id TEXT,to_id TEXT,body TEXT)")
+            s.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT")
+            s.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT")
             // seed
             s.execute("INSERT INTO offers VALUES('o1','Starter Pack',5.0,true),('o2','Pro Season',20.0,true) ON CONFLICT DO NOTHING")
             s.execute("INSERT INTO features VALUES('f1','LIVE_SCORES','Live Scores','Real-time'),('f2','AIRTIME','Airtime Rewards','Earn airtime') ON CONFLICT DO NOTHING")
@@ -67,8 +69,9 @@ class PostgresStore(private val url: String) : Store {
     override suspend fun signUp(phone: String) = withContext(Dispatchers.IO) {
         val t = Tokens("u-" + System.nanoTime(), phone, "at-" + System.nanoTime(), "rt-" + System.nanoTime(),
             java.time.Instant.now().plusSeconds(3600).toString())
-        c().prepareStatement("INSERT INTO users VALUES(?,?,?,?,?)").apply {
+        c().prepareStatement("INSERT INTO users VALUES(?,?,?,?,?,?,?)").apply {
             setString(1, t.userId); setString(2, t.phone); setString(3, t.accessToken); setString(4, t.refreshToken); setString(5, t.expiresAt)
+            setString(6, java.time.Instant.now().toString()); setString(7, "active")
         }.executeUpdate()
         t
     }
@@ -100,6 +103,32 @@ class PostgresStore(private val url: String) : Store {
             }.executeUpdate()
             t
         }
+    }
+
+    override suspend fun users(): List<AdminUser> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT user_id, phone, created_at, status FROM users").executeQuery().let { rs ->
+            buildList { while (rs.next()) add(AdminUser(rs.getString(1), rs.getString(2), rs.getString(3) ?: "", rs.getString(4) ?: "active")) }
+        }
+    }
+
+    override suspend fun setUserStatus(id: String, status: String): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("UPDATE users SET status=? WHERE user_id=?").apply {
+            setString(1, status); setString(2, id)
+        }.executeUpdate() > 0
+    }
+
+    override suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer = withContext(Dispatchers.IO) {
+        val o = Offer("o-" + System.nanoTime(), title, price, verified)
+        c().prepareStatement("INSERT INTO offers VALUES(?,?,?,?)").apply {
+            setString(1, o.id); setString(2, o.title); setDouble(3, o.price); setBoolean(4, o.verified)
+        }.executeUpdate()
+        o
+    }
+
+    override suspend fun setOfferVerified(id: String, verified: Boolean): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("UPDATE offers SET verified=? WHERE id=?").apply {
+            setBoolean(1, verified); setString(2, id)
+        }.executeUpdate() > 0
     }
 
     override fun close() { try { conn?.close() } catch (_: Exception) {} }
