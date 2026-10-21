@@ -13,6 +13,11 @@ import kotlinx.serialization.Serializable
 @Serializable data class OtpVerify(val phone: String, val code: String)
 @Serializable data class RefreshRequest(val refreshToken: String)
 @Serializable data class OkResult(val ok: Boolean)
+@Serializable data class OtpSent(val ok: Boolean, val devCode: String)
+@Serializable data class ApiError(val error: String)
+@Serializable data class AdminUser(val id: String, val phone: String, val createdAt: String, val status: String)
+@Serializable data class UserStatusRequest(val status: String)
+@Serializable data class OfferCreate(val title: String, val price: Double, val verified: Boolean = true)
 
 interface Store {
     suspend fun offers(): List<Offer>
@@ -25,11 +30,15 @@ interface Store {
     suspend fun requestOtp(phone: String): String // returns otp code (dev)
     suspend fun verifyOtp(phone: String, code: String): Tokens?
     suspend fun refresh(refreshToken: String): Tokens?
+    suspend fun users(): List<AdminUser> = emptyList()
+    suspend fun setUserStatus(id: String, status: String): Boolean = false
+    suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer? = null
+    suspend fun setOfferVerified(id: String, verified: Boolean): Boolean = false
     fun close() {}
 }
 
 class InMemoryStore : Store {
-    private val offers = listOf(
+    @Volatile private var offersList = mutableListOf(
         Offer("o1", "Starter Pack", 5.0),
         Offer("o2", "Pro Season", 20.0)
     )
@@ -42,11 +51,12 @@ class InMemoryStore : Store {
         "f2" to listOf(Pass("p2", "f2", "u1"))
     )
     private val users = mutableMapOf<String, Tokens>()
+    private val userMeta = mutableMapOf<String, AdminUser>()
     private val otps = mutableMapOf<String, String>()
     private var seq = 0
     private fun next(prefix: String) = "$prefix-${++seq}"
 
-    override suspend fun offers() = offers
+    override suspend fun offers() = offersList.toList()
     override suspend fun features() = features
     override suspend fun featureByCode(code: String) = features.firstOrNull { it.code == code }
     override suspend fun passes(featureId: String) = passes[featureId] ?: emptyList()
@@ -56,7 +66,9 @@ class InMemoryStore : Store {
     override suspend fun signIn(phone: String): Tokens? = users["u:$phone"]
     override suspend fun signUp(phone: String): Tokens {
         val t = Tokens(next("u"), phone, next("at"), next("rt"), java.time.Instant.now().plusSeconds(3600).toString())
-        users["u:$phone"] = t; users["rt:${t.refreshToken}"] = t; return t
+        users["u:$phone"] = t; users["rt:${t.refreshToken}"] = t
+        userMeta[t.userId] = AdminUser(t.userId, phone, java.time.Instant.now().toString(), "active")
+        return t
     }
     override suspend fun requestOtp(phone: String): String {
         val code = "%06d".format((100000..999999).random()); otps[phone] = code; return code
@@ -67,5 +79,24 @@ class InMemoryStore : Store {
         val old = users["rt:$refreshToken"] ?: return null
         val t = old.copy(accessToken = next("at"), refreshToken = next("rt"))
         users["u:${t.phone}"] = t; users["rt:${t.refreshToken}"] = t; return t
+    }
+
+    override suspend fun users(): List<AdminUser> = userMeta.values.sortedBy { it.createdAt }
+
+    override suspend fun setUserStatus(id: String, status: String): Boolean {
+        val u = userMeta[id] ?: return false
+        userMeta[id] = u.copy(status = status); return true
+    }
+
+    override suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer {
+        val o = Offer(next("o"), title, price, verified)
+        offersList = (offersList + o).toMutableList()
+        return o
+    }
+
+    override suspend fun setOfferVerified(id: String, verified: Boolean): Boolean {
+        val o = offersList.firstOrNull { it.id == id } ?: return false
+        offersList = offersList.map { if (it.id == id) it.copy(verified = verified) else it }.toMutableList()
+        return true
     }
 }
