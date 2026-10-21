@@ -1,10 +1,14 @@
 package relay
 
+import io.ktor.client.call.body
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientCNC
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.testing.*
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class RoutesTest {
@@ -125,31 +129,41 @@ class RoutesTest {
         val s = InMemoryStore()
         testApplication {
             application { relayModule(s, "secret") }
-            val c = createClient { }
-            // register a user first
-            c.post("/api/auth/sign-up") { contentType(ContentType.Application.Json); setBody("""{"phone":"+23477"}""") }
+            val c = createClient { install(ClientCNC) { json(Codec.json) } }
+            // register a user first — decode sign-up response with kotlinx.serialization into the typed DTO
+            val signUpRaw = c.post("/api/auth/sign-up") {
+                header("X-Server-Key", "secret") // /api/* is guarded when RELAY_SERVER_KEY is set
+                contentType(ContentType.Application.Json); setBody("""{"phone":"+23477"}""")
+            }
+            assertEquals(HttpStatusCode.OK, signUpRaw.status) // assert sign-up status before decoding
+            val signUp: Tokens = signUpRaw.body<Tokens>()
+            assertTrue(signUp.userId.isNotBlank() && signUp.phone == "+23477")
             // HTML dashboard
             val html = c.get("/admin") { header("X-Admin-Key", "secret") }
             assertEquals(HttpStatusCode.OK, html.status)
             assertTrue(html.contentType()?.match(ContentType.Text.Html) == true)
             assertTrue(html.bodyAsText().contains("Bingwa Relay"))
-            // users list + kill switch
-            val users = c.get("/admin/api/users") { header("X-Admin-Key", "secret") }.bodyAsText()
-            val uid = Regex("\"id\":\"([^\"]+)\"").find(users)!!.groupValues[1]
+            // users list + kill-switch round-trip (typed decode instead of regex scraping)
+            val users: List<AdminUser> = c.get("/admin/api/users") { header("X-Admin-Key", "secret") }.body()
+            val uid = users.first { it.phone == "+23477" }.id
             val kill = c.post("/admin/api/users/$uid/status") {
                 header("X-Admin-Key", "secret"); contentType(ContentType.Application.Json)
                 setBody("""{"status":"disabled"}""")
             }
             assertEquals(HttpStatusCode.OK, kill.status)
-            assertTrue(c.get("/admin/api/users") { header("X-Admin-Key", "secret") }.bodyAsText().contains("disabled"))
+            assertEquals("disabled", c.get("/admin/api/users") { header("X-Admin-Key", "secret") }.body<List<AdminUser>>().first { it.id == uid }.status)
+            // reactivate to prove full round-trip
+            assertEquals(HttpStatusCode.OK, c.post("/admin/api/users/$uid/status") {
+                header("X-Admin-Key", "secret"); contentType(ContentType.Application.Json)
+                setBody("""{"status":"active"}""")
+            }.status)
+            assertEquals("active", c.get("/admin/api/users") { header("X-Admin-Key", "secret") }.body<List<AdminUser>>().first { it.id == uid }.status)
             // offers create + disable
-            val created = c.post("/admin/api/offers") {
+            val created: Offer = c.post("/admin/api/offers") {
                 header("X-Admin-Key", "secret"); contentType(ContentType.Application.Json)
                 setBody("""{"title":"Test Offer","price":3.5,"verified":true}""")
-            }
-            assertEquals(HttpStatusCode.OK, created.status)
-            val oid = Regex("\"id\":\"([^\"]+)\"").find(created.bodyAsText())!!.groupValues[1]
-            assertEquals(HttpStatusCode.OK, c.post("/admin/api/offers/$oid/disable") { header("X-Admin-Key", "secret") }.status)
+            }.body<Offer>()
+            assertEquals(HttpStatusCode.OK, c.post("/admin/api/offers/${created.id}/disable") { header("X-Admin-Key", "secret") }.status)
             // feature flags editor
             assertEquals(HttpStatusCode.OK, c.post("/admin/api/flags") {
                 header("X-Admin-Key", "secret"); contentType(ContentType.Application.Json)
@@ -159,8 +173,8 @@ class RoutesTest {
                 header("X-Admin-Key", "secret"); contentType(ContentType.Application.Json)
                 setBody("""not json""")
             }.status)
-            // message log after /api/messages/send
-            c.post("/api/messages/send") { contentType(ContentType.Application.Json); setBody("""{"to":"+1","body":"logged"}""") }
+            // message log after /api/messages/send (X-Server-Key needed for guarded /api/*)
+            c.post("/api/messages/send") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"to":"+1","body":"logged"}""") }
             assertTrue(c.get("/admin/api/messages") { header("X-Admin-Key", "secret") }.bodyAsText().contains("logged"))
             // metrics + ws count + audit
             val m = c.get("/admin/api/metrics") { header("X-Admin-Key", "secret") }.bodyAsText()
