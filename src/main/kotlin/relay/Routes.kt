@@ -28,6 +28,10 @@ fun Application.relayModule(store: Store, serverKey: String?) {
         timeout = 12.seconds
     }
     install(SSE)
+    installCors()
+    installRequestLogging()
+    val authRateLimiter = RateLimitStub((env("RATE_LIMIT_AUTH_PER_MIN") ?: "30").toInt())
+    installAuthRateLimit(authRateLimiter)
     install(StatusPages) {
         status(HttpStatusCode.NotFound) { call, _ ->
             call.respond(HttpStatusCode.NotFound, ApiError("not_found"))

@@ -19,6 +19,7 @@ dependencies {
     implementation("io.ktor:ktor-server-websockets:$ktorVersion")
     implementation("io.ktor:ktor-server-sse:$ktorVersion")
     implementation("io.ktor:ktor-server-status-pages:$ktorVersion")
+    implementation("io.ktor:ktor-server-cors:$ktorVersion")
     implementation("org.postgresql:postgresql:42.7.3")
     implementation("ch.qos.logback:logback-classic:1.5.6")
 
