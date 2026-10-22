@@ -138,7 +138,7 @@ class PostgresStore(
 
     // ---- helpers used by Relay 15 (store generator) & audit ----
     /** Insert a transaction row (status defaults to 'pending'). */
-    suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String = "NGN"): String =
+    override suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String): String =
         withContext(Dispatchers.IO) {
             val id = "tx-" + System.nanoTime()
             c().prepareStatement("INSERT INTO transactions(id,user_id,agent_slug,offer_id,amount,currency,status) VALUES(?,?,?,?,?,?, 'pending')").apply {
@@ -149,18 +149,18 @@ class PostgresStore(
         }
 
     /** Verified offers belonging to one agent storefront. */
-    suspend fun offersForAgent(slug: String): List<Offer> = withContext(Dispatchers.IO) {
-        c().prepareStatement("SELECT id,title,price,verified FROM offers WHERE agent_slug=? AND verified=true").apply {
+    override suspend fun offersForAgent(slug: String): List<Offer> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id,title,price,verified FROM offers WHERE (agent_slug=? OR agent_slug IS NULL) AND verified=true").apply {
             setString(1, slug)
         }.executeQuery().let { rs -> buildList { while (rs.next()) add(Offer(rs.getString(1), rs.getString(2), rs.getDouble(3), rs.getBoolean(4))) } }
     }
 
-    suspend fun agentExists(slug: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun agentExists(slug: String): Boolean = withContext(Dispatchers.IO) {
         c().prepareStatement("SELECT 1 FROM agents WHERE slug=? AND active=true").apply { setString(1, slug) }
             .executeQuery().next()
     }
 
-    suspend fun createAgent(slug: String, name: String, ownerPhone: String?): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun createAgent(slug: String, name: String, ownerPhone: String?): Boolean = withContext(Dispatchers.IO) {
         c().prepareStatement("INSERT INTO agents(slug,name,owner_phone) VALUES(?,?,?) ON CONFLICT (slug) DO NOTHING").apply {
             setString(1, slug); setString(2, name); ownerPhone?.let { setString(3, it) } ?: setNull(3, java.sql.Types.NULL)
         }.executeUpdate() > 0

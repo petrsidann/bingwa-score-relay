@@ -49,6 +49,8 @@ fun Application.relayModule(store: Store, serverKey: String?) {
                 // Route-level interceptor guards every /api/* call; finish() halts the pipeline.
                 intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
                     val key = call.request.headers["X-Server-Key"]
+                        ?: call.request.headers["X-Admin-Key"]
+                        ?: call.request.queryParameters["key"]
                     if (key != serverKey) {
                         call.respond(HttpStatusCode.Unauthorized, ApiError("bad_server_key"))
                         finish()
@@ -58,8 +60,85 @@ fun Application.relayModule(store: Store, serverKey: String?) {
             relayApi(store)
         }
         relaySocketAndSse()
-        adminRoutes(store, serverKey)
-        metricsRoutes(serverKey)
+        storefrontRoutes(store, serverKey)
+    }
+    adminRoutes(store, serverKey)
+    metricsRoutes(serverKey)
+}
+
+fun Route.storefrontRoutes(store: Store, serverKey: String?) {
+    route("/api/agents") {
+        gateAdmin(serverKey)
+        post {
+            AdminState.count("POST /api/agents")
+            val bodyText = call.receiveText()
+            val req = if (bodyText.isBlank()) AgentCreateRequest() else try { Codec.json.decodeFromString<AgentCreateRequest>(bodyText) } catch (_: Exception) { AgentCreateRequest() }
+            val slug = req.slug?.ifBlank { null }
+                ?: req.name?.lowercase()?.replace(Regex("[^a-z0-9]+"), "-")?.trim('-')?.ifBlank { null }
+                ?: "agent-${System.currentTimeMillis()}"
+            val name = req.name?.ifBlank { null } ?: slug
+            val phone = req.ownerPhone ?: req.phone
+            store.createAgent(slug, name, phone)
+            call.respond(AgentResponse(slug, name, active = true))
+        }
+    }
+
+    route("/store/{slug}") {
+        get {
+            AdminState.count("GET /store/{slug}")
+            val slug = call.parameters["slug"] ?: ""
+            if (!store.agentExists(slug)) {
+                call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                return@get
+            }
+            val offers = store.offersForAgent(slug)
+            val tx = call.request.queryParameters["tx"]
+            val bought = call.request.queryParameters["bought"]
+            call.respondText(renderStorefront(slug, offers, bought, tx), ContentType.Text.Html)
+        }
+
+        get("/offers") {
+            AdminState.count("GET /store/{slug}/offers")
+            val slug = call.parameters["slug"] ?: ""
+            if (!store.agentExists(slug)) {
+                call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                return@get
+            }
+            call.respond(store.offersForAgent(slug))
+        }
+
+        post("/buy") {
+            AdminState.count("POST /store/{slug}/buy")
+            val slug = call.parameters["slug"] ?: ""
+            if (!store.agentExists(slug)) {
+                call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                return@post
+            }
+            val bodyText = call.receiveText()
+            val offerId = try {
+                call.request.queryParameters["offerId"]
+                    ?: Codec.json.decodeFromString<BuyRequest>(bodyText).offerId
+            } catch (_: Exception) {
+                try {
+                    parseQueryString(bodyText)["offerId"]
+                } catch (_: Exception) { null }
+            } ?: ""
+
+            val offer = store.offersForAgent(slug).firstOrNull { it.id == offerId }
+                ?: store.offers().firstOrNull { it.id == offerId }
+            if (offer == null) {
+                call.respond(HttpStatusCode.NotFound, ApiError("offer_not_found"))
+                return@post
+            }
+            val txId = store.insertTransaction(userId = null, agentSlug = slug, offerId = offer.id, amount = offer.price)
+            val isJsonReq = call.request.headers["Accept"]?.contains("application/json") == true ||
+                            call.request.contentType().match(ContentType.Application.Json)
+            if (isJsonReq) {
+                call.respond(BuyResponse(ok = true, transactionId = txId, status = "pending", amount = offer.price))
+            } else {
+                call.respondRedirect("/store/$slug?tx=$txId&bought=${offer.id}")
+            }
+        }
     }
 }
 

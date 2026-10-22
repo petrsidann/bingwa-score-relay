@@ -187,4 +187,71 @@ class RoutesTest {
             assertTrue(csv.bodyAsText().contains("+23477"))
         }
     }
+
+    @Test fun agentAdminGateRejectsMissingKey() {
+        testApplication {
+            application { relayModule(InMemoryStore(), "secret") }
+            val c = createClient { }
+            val noKey = c.post("/api/agents") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"name":"Agent One"}""")
+            }
+            assertEquals(HttpStatusCode.Unauthorized, noKey.status)
+
+            val withKey = c.post("/api/agents") {
+                header("X-Admin-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"slug":"agent-one","name":"Agent One"}""")
+            }
+            assertEquals(HttpStatusCode.OK, withKey.status)
+            assertTrue(withKey.bodyAsText().contains("agent-one"))
+        }
+    }
+
+    @Test fun storefrontRendersOnlyDbPricesAndCreatesPendingTx() = runBlocking {
+        val s = InMemoryStore()
+        s.createAgent("agent-alpha", "Agent Alpha", "+2348000000000")
+        val offer = s.createOffer("Special Bundle", 99.99, true)
+
+        testApplication {
+            application { relayModule(s, null) }
+            val c = createClient { }
+
+            // 1) Storefront renders DB offer title and price (99.99)
+            val storeHtml = c.get("/store/agent-alpha")
+            assertEquals(HttpStatusCode.OK, storeHtml.status)
+            val htmlBody = storeHtml.bodyAsText()
+            assertTrue(htmlBody.contains("Special Bundle"))
+            assertTrue(htmlBody.contains("99.99"))
+
+            // 2) JSON endpoint for agent's verified offers
+            val storeOffers = c.get("/store/agent-alpha/offers")
+            assertEquals(HttpStatusCode.OK, storeOffers.status)
+            assertTrue(storeOffers.bodyAsText().contains("99.99"))
+
+            // 3) Nonexistent agent store returns 404
+            assertEquals(HttpStatusCode.NotFound, c.get("/store/unknown-agent").status)
+
+            // 4) Buy action creates pending transaction
+            val buyRes = c.post("/store/agent-alpha/buy") {
+                header("Accept", "application/json")
+                contentType(ContentType.Application.Json)
+                setBody("""{"offerId":"${offer.id}"}""")
+            }
+            assertEquals(HttpStatusCode.OK, buyRes.status)
+            val buyBody = buyRes.bodyAsText()
+            assertTrue(buyBody.contains("\"ok\":true"))
+            assertTrue(buyBody.contains("pending"))
+
+            val txs = s.transactions()
+            assertEquals(1, txs.size)
+            assertEquals("pending", txs[0].status)
+            assertEquals("agent-alpha", txs[0].agentSlug)
+            assertEquals(99.99, txs[0].amount)
+
+            // 5) Confirmation state in HTML storefront
+            val confirmHtml = c.get("/store/agent-alpha?tx=${txs[0].id}&bought=${offer.id}").bodyAsText()
+            assertTrue(confirmHtml.contains("Transaction pending confirmation"))
+        }
+    }
 }
