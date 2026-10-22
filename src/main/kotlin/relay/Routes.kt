@@ -81,7 +81,7 @@ fun Route.relayApi(store: Store) {
         val req = call.receive<SendRequest>()
         val from = call.request.headers["X-User-Id"] ?: "anon"
         val m = store.sendMessage(from, req.to, req.body)
-        AdminState.addMessage(m.copy(from = from))
+        AdminState.addMessage(m.copy(from = from, atMs = System.currentTimeMillis()))
         bus.tryEmit(encodeFrame("message.sent", Codec.json.encodeToJsonElement(Message.serializer(), m)))
         call.respond(SendResult(true, m.id))
     }
