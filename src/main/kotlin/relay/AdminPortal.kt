@@ -4,7 +4,7 @@ package relay
  * Admin portal v2 — SPA shell served by Ktor as static assets (no frontend build).
  * Stack: Tailwind (CDN) + htmx + Chart.js, Inter/Manrope fonts, dark-slate canvas,
  * brand blue #2563EB, 8pt spacing grid. The shell carries no data; all content is
- * fetched by /admin/assets/app.js from the gated /admin/api/* JSON endpoints.
+ * fetched by /admin/assets/app.js from the gated "admin/api" JSON endpoints.
  */
 object AdminPortal {
     val shell: String = SHELL
