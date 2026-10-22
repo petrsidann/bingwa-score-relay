@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class Offer(val id: String, val title: String, val price: Double, val verified: Boolean = true)
 @Serializable data class Feature(val id: String, val code: String, val name: String, val description: String = "")
 @Serializable data class Pass(val id: String, val featureId: String, val userId: String, val active: Boolean = true)
-@Serializable data class Message(val id: String, val from: String, val to: String, val body: String)
+@Serializable data class Message(val id: String, val from: String, val to: String, val body: String, val atMs: Long? = null)
 @Serializable data class SendRequest(val to: String, val body: String)
 @Serializable data class SendResult(val ok: Boolean, val messageId: String)
 @Serializable data class Tokens(val userId: String, val phone: String, val accessToken: String, val refreshToken: String, val expiresAt: String)

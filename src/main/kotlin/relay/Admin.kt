@@ -6,6 +6,7 @@ import io.ktor.server.plugins.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.http.content.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
@@ -32,6 +33,12 @@ object AdminState {
         while (auditLog.size > 500) auditLog.pollLast()
     }
 
+    /** Messages recorded in the last 60 seconds (for the live chart). */
+    fun messagesLastMinute(): Int {
+        val cutoff = System.currentTimeMillis() - 60_000
+        return messageLog.count { (it.atMs ?: 0L) >= cutoff }
+    }
+
     fun uptimeSeconds(): Long = (System.currentTimeMillis() - startedAtMs) / 1000
 }
 
@@ -45,22 +52,36 @@ object WsRegistry {
     fun count(): Int = AdminState.wsConnections.get()
 }
 
-fun Application.adminRoutes(store: Store, serverKey: String?) {
+/** Shared admin gate: ADMIN_KEY (falls back to RELAY_SERVER_KEY) via X-Admin-Key header or ?key=. */
+fun io.ktor.server.routing.RouteIntercepting.gateAdmin(serverKey: String?) {
     val adminKey = env("ADMIN_KEY") ?: serverKey
-    routing {
-        route("/admin") {
-            // Gate everything (HTML + JSON API) behind ADMIN_KEY.
-            intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
-                val provided = call.request.headers["X-Admin-Key"]
-                    ?: call.request.queryParameters["key"]
-                if (adminKey.isNullOrBlank() || provided != adminKey) {
-                    call.respond(HttpStatusCode.Unauthorized, ApiError("bad_admin_key"))
-                    finish()
-                }
-            }
+    intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
+        val provided = call.request.headers["X-Admin-Key"]
+            ?: call.request.queryParameters["key"]
+        if (adminKey.isNullOrBlank() || provided != adminKey) {
+            call.respond(HttpStatusCode.Unauthorized, ApiError("bad_admin_key"))
+            finish()
+        }
+    }
+}
 
-            // ---- Server-rendered HTML dashboard ----
-            get { call.respondText(AdminHtml.render(store), ContentType.Text.Html) }
+fun Application.adminRoutes(store: Store, serverKey: String?) {
+    // SPA assets: serve from the classpath (works in tests + fat jar); WEB_DIR overrides with a
+    // filesystem directory for live-editing during development.
+    val webDir = env("WEB_DIR")
+    routing {
+        if (webDir != null && java.io.File(webDir).isDirectory) {
+            staticFiles("/admin/assets", java.io.File(webDir))
+        } else {
+            staticResources("/admin/assets", "web")
+        }
+
+        route("/admin") {
+            // Gate everything else (HTML shell + JSON API) behind ADMIN_KEY.
+            gateAdmin(serverKey)
+
+            // ---- SPA shell (static assets under /admin/assets/*) ----
+            get { call.respondText(AdminPortal.shell, ContentType.Text.Html) }
 
             // ---- JSON API for a future web UI ----
             route("/api") {
@@ -86,6 +107,14 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
                     val id = call.parameters["id"] ?: ""
                     val ok = store.setOfferVerified(id, false)
                     AdminState.addAudit("offer.disable", id)
+                    if (ok) call.respond(OkResult(true)) else call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                }
+                post("/offers/{id}/verify") {
+                    AdminState.count("POST /admin/api/offers/{id}/verify")
+                    val id = call.parameters["id"] ?: ""
+                    val verified = call.request.queryParameters["value"]?.toBooleanStrictOrNull() ?: true
+                    val ok = store.setOfferVerified(id, verified)
+                    AdminState.addAudit("offer.verify", "$id -> $verified")
                     if (ok) call.respond(OkResult(true)) else call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
                 }
                 get("/flags") {
