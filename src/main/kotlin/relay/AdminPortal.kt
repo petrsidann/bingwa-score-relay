@@ -74,6 +74,10 @@ object AdminPortal {
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.568 3H5.25A2.25 2.25 0 0 0 3 5.25v4.318c0 .597.237 1.17.659 1.591l9.585 9.585c.421.422.994.659 1.591.659H18a2.25 2.25 0 0 0 2.25-2.25v-4.318c0-.597-.237-1.17-.659-1.591L9.99 3.66A2.252 2.252 0 0 0 8.4 3h1.168ZM6 6h.008v.008H6V6Z"/></svg>
           Offers
         </a>
+        <a class="nav-item" href="#/payments" data-route="payments">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z"/></svg>
+          Payments
+        </a>
       </nav>
       <div class="border-t border-slate-800 px-6 py-4">
         <p class="t-label text-slate-600">Relay · live over SSE</p>

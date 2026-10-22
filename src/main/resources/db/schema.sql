@@ -74,14 +74,15 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
-    id         TEXT PRIMARY KEY,
-    user_id    TEXT,
-    agent_slug TEXT,
-    offer_id   TEXT REFERENCES offers(id),
-    amount     DOUBLE PRECISION NOT NULL,
-    currency   TEXT NOT NULL DEFAULT 'NGN',
-    status     TEXT NOT NULL DEFAULT 'pending',     -- pending | paid | failed | refunded
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                  TEXT PRIMARY KEY,
+    user_id             TEXT,
+    agent_slug          TEXT,
+    offer_id            TEXT REFERENCES offers(id),
+    amount              DOUBLE PRECISION NOT NULL,
+    currency            TEXT NOT NULL DEFAULT 'NGN',
+    status              TEXT NOT NULL DEFAULT 'pending',     -- pending | paid | failed | refunded
+    checkout_request_id TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS flags (

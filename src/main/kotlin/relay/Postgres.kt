@@ -138,15 +138,60 @@ class PostgresStore(
 
     // ---- helpers used by Relay 15 (store generator) & audit ----
     /** Insert a transaction row (status defaults to 'pending'). */
-    override suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String): String =
+    override suspend fun insertTransaction(userId: String?, agentSlug: String?, offerId: String, amount: Double, currency: String, checkoutRequestId: String?): String =
         withContext(Dispatchers.IO) {
             val id = "tx-" + System.nanoTime()
-            c().prepareStatement("INSERT INTO transactions(id,user_id,agent_slug,offer_id,amount,currency,status) VALUES(?,?,?,?,?,?, 'pending')").apply {
+            c().prepareStatement("INSERT INTO transactions(id,user_id,agent_slug,offer_id,amount,currency,status,checkout_request_id) VALUES(?,?,?,?,?,?, 'pending',?)").apply {
                 setString(1, id); userId?.let { setString(2, it) } ?: setNull(2, java.sql.Types.NULL)
-                setString(3, agentSlug); setString(4, offerId); setDouble(5, amount); setString(6, currency)
+                agentSlug?.let { setString(3, it) } ?: setNull(3, java.sql.Types.NULL)
+                setString(4, offerId); setDouble(5, amount); setString(6, currency)
+                checkoutRequestId?.let { setString(7, it) } ?: setNull(7, java.sql.Types.NULL)
             }.executeUpdate()
             id
         }
+
+    override suspend fun setTransactionStatus(id: String, status: String): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("UPDATE transactions SET status=? WHERE id=? OR checkout_request_id=?").apply {
+            setString(1, status); setString(2, id); setString(3, id)
+        }.executeUpdate() > 0
+    }
+
+    override suspend fun findTransactionByCheckoutId(checkoutRequestId: String): Transaction? = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id, user_id, agent_slug, offer_id, amount, currency, status, checkout_request_id, created_at FROM transactions WHERE checkout_request_id=? OR id=?").apply {
+            setString(1, checkoutRequestId); setString(2, checkoutRequestId)
+        }.executeQuery().let { rs ->
+            if (rs.next()) Transaction(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9)) else null
+        }
+    }
+
+    override suspend fun findTransactionById(id: String): Transaction? = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id, user_id, agent_slug, offer_id, amount, currency, status, checkout_request_id, created_at FROM transactions WHERE id=? OR checkout_request_id=?").apply {
+            setString(1, id); setString(2, id)
+        }.executeQuery().let { rs ->
+            if (rs.next()) Transaction(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9)) else null
+        }
+    }
+
+    override suspend fun grantPass(userId: String, offerIdOrFeatureId: String): Pass = withContext(Dispatchers.IO) {
+        val passId = "p-" + System.nanoTime()
+        val featureId = "f1"
+        c().prepareStatement("INSERT INTO passes(id, feature_id, user_id, active) VALUES(?,?,?,true)").apply {
+            setString(1, passId); setString(2, featureId); setString(3, userId)
+        }.executeUpdate()
+        Pass(passId, featureId, userId, active = true)
+    }
+
+    override suspend fun transactions(status: String?): List<Transaction> = withContext(Dispatchers.IO) {
+        val sql = if (status.isNullOrBlank()) "SELECT id, user_id, agent_slug, offer_id, amount, currency, status, checkout_request_id, created_at FROM transactions"
+                  else "SELECT id, user_id, agent_slug, offer_id, amount, currency, status, checkout_request_id, created_at FROM transactions WHERE status=?"
+        val stmt = c().prepareStatement(sql)
+        if (!status.isNullOrBlank()) stmt.setString(1, status)
+        stmt.executeQuery().let { rs ->
+            buildList {
+                while (rs.next()) add(Transaction(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9)))
+            }
+        }
+    }
 
     /** Verified offers belonging to one agent storefront. */
     override suspend fun offersForAgent(slug: String): List<Offer> = withContext(Dispatchers.IO) {
