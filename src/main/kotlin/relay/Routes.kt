@@ -13,6 +13,7 @@ import io.ktor.server.websocket.*
 import io.ktor.server.sse.*
 import io.ktor.http.*
 import io.ktor.websocket.readText
+import kotlinx.serialization.json.*
 
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlin.time.Duration.Companion.seconds
@@ -46,14 +47,16 @@ fun Application.relayModule(store: Store, serverKey: String?) {
 
         route("/api") {
             if (serverKey != null) {
-                // Route-level interceptor guards every /api/* call; finish() halts the pipeline.
+                // Route-level interceptor guards every /api/* call (except public webhook callbacks); finish() halts the pipeline.
                 intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
-                    val key = call.request.headers["X-Server-Key"]
-                        ?: call.request.headers["X-Admin-Key"]
-                        ?: call.request.queryParameters["key"]
-                    if (key != serverKey) {
-                        call.respond(HttpStatusCode.Unauthorized, ApiError("bad_server_key"))
-                        finish()
+                    if (!call.request.path().endsWith("/payments/callback")) {
+                        val key = call.request.headers["X-Server-Key"]
+                            ?: call.request.headers["X-Admin-Key"]
+                            ?: call.request.queryParameters["key"]
+                        if (key != serverKey) {
+                            call.respond(HttpStatusCode.Unauthorized, ApiError("bad_server_key"))
+                            finish()
+                        }
                     }
                 }
             }
@@ -61,9 +64,100 @@ fun Application.relayModule(store: Store, serverKey: String?) {
         }
         relaySocketAndSse()
         storefrontRoutes(store, serverKey)
+        paymentsRoutes(store)
     }
     adminRoutes(store, serverKey)
     metricsRoutes(serverKey)
+}
+
+fun Route.paymentsRoutes(store: Store) {
+    route("/api/payments") {
+        post("/stk") {
+            AdminState.count("POST /api/payments/stk")
+            val bodyText = call.receiveText()
+            val req = if (bodyText.isBlank()) {
+                return@post call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+            } else {
+                try { Codec.json.decodeFromString<StkRequest>(bodyText) } catch (_: Exception) { return@post call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request")) }
+            }
+            val offer = store.offers().firstOrNull { it.id == req.offerId }
+                ?: return@post call.respond(HttpStatusCode.NotFound, ApiError("offer_not_found"))
+
+            val stkResult = MPesaService.initiateStkPush(req.phone, offer.price, offer.id)
+            val txId = store.insertTransaction(
+                userId = req.userId,
+                agentSlug = req.agentSlug,
+                offerId = offer.id,
+                amount = offer.price,
+                currency = "KES",
+                checkoutRequestId = stkResult.checkoutRequestId
+            )
+
+            val status = if (MPesaService.isSandbox) {
+                // Sandbox mode: simulate success and self-invoke callback logic idempotently
+                store.setTransactionStatus(txId, "paid")
+                store.grantPass(req.userId ?: "anon", offer.id)
+                "paid"
+            } else {
+                "pending"
+            }
+
+            call.respond(StkResponse(ok = true, transactionId = txId, checkoutRequestId = stkResult.checkoutRequestId, status = status))
+        }
+
+        post("/callback") {
+            AdminState.count("POST /api/payments/callback")
+            val bodyText = call.receiveText()
+            var checkoutId: String? = null
+            var resultCode = 0
+
+            if (bodyText.isNotBlank()) {
+                try {
+                    val root = Json.parseToJsonElement(bodyText).jsonObject
+                    val stkCallback = root["Body"]?.jsonObject?.get("stkCallback")?.jsonObject
+                    if (stkCallback != null) {
+                        checkoutId = stkCallback["CheckoutRequestID"]?.jsonPrimitive?.content
+                        resultCode = stkCallback["ResultCode"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                    } else {
+                        checkoutId = root["checkoutRequestId"]?.jsonPrimitive?.content ?: root["CheckoutRequestID"]?.jsonPrimitive?.content
+                        resultCode = root["resultCode"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                    }
+                } catch (_: Exception) {
+                    try {
+                        val params = parseQueryString(bodyText)
+                        checkoutId = params["checkoutRequestId"] ?: params["CheckoutRequestID"]
+                        resultCode = params["resultCode"]?.toIntOrNull() ?: 0
+                    } catch (_: Exception) { }
+                }
+            }
+
+            if (checkoutId.isNullOrBlank()) {
+                checkoutId = call.request.queryParameters["checkoutRequestId"] ?: call.request.queryParameters["CheckoutRequestID"]
+            }
+
+            if (checkoutId.isNullOrBlank()) {
+                return@post call.respond(HttpStatusCode.BadRequest, ApiError("missing_checkout_id"))
+            }
+
+            val tx = store.findTransactionByCheckoutId(checkoutId)
+                ?: store.findTransactionById(checkoutId)
+                ?: return@post call.respond(HttpStatusCode.NotFound, ApiError("transaction_not_found"))
+
+            // Idempotency: if already processed (paid or failed), do not grant pass again
+            if (tx.status == "paid" || tx.status == "failed") {
+                return@post call.respond(CallbackResponse(0, "Accepted (already processed)", alreadyProcessed = true))
+            }
+
+            if (resultCode == 0) {
+                store.setTransactionStatus(tx.id, "paid")
+                store.grantPass(tx.userId ?: "anon", tx.offerId)
+            } else {
+                store.setTransactionStatus(tx.id, "failed")
+            }
+
+            call.respond(CallbackResponse(0, "Accepted"))
+        }
+    }
 }
 
 fun Route.storefrontRoutes(store: Store, serverKey: String?) {

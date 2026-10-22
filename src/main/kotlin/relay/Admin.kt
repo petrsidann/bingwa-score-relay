@@ -150,6 +150,29 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
                         call.respond(HttpStatusCode.BadRequest, ApiError("invalid_json"))
                     }
                 }
+                get("/transactions") {
+                    AdminState.count("GET /admin/api/transactions")
+                    val status = call.request.queryParameters["status"]
+                    call.respond(store.transactions(status))
+                }
+                post("/transactions/{id}/confirm") {
+                    AdminState.count("POST /admin/api/transactions/{id}/confirm")
+                    val id = call.parameters["id"] ?: ""
+                    val tx = store.findTransactionById(id) ?: store.findTransactionByCheckoutId(id)
+                    if (tx == null) {
+                        call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                    } else {
+                        store.setTransactionStatus(tx.id, "paid")
+                        store.grantPass(tx.userId ?: "anon", tx.offerId)
+                        call.respond(OkResult(true))
+                    }
+                }
+                post("/transactions/{id}/fail") {
+                    AdminState.count("POST /admin/api/transactions/{id}/fail")
+                    val id = call.parameters["id"] ?: ""
+                    val ok = store.setTransactionStatus(id, "failed")
+                    if (ok) call.respond(OkResult(true)) else call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+                }
                 get("/messages") {
                     AdminState.count("GET /admin/api/messages")
                     call.respond(AdminState.messageLog.toList())

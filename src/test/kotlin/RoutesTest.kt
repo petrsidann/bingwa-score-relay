@@ -254,4 +254,59 @@ class RoutesTest {
             assertTrue(confirmHtml.contains("Transaction pending confirmation"))
         }
     }
+
+    @Test fun mpesaSandboxAndIdempotentCallback() = runBlocking {
+        val s = InMemoryStore()
+        testApplication {
+            application { relayModule(s, "secret") }
+            val c = createClient { }
+
+            // 1) Sandbox STK Push
+            val stkRes = c.post("/api/payments/stk") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"+254700000000","offerId":"o1","userId":"u-mpesa"}""")
+            }
+            assertEquals(HttpStatusCode.OK, stkRes.status)
+            val stkBody = stkRes.bodyAsText()
+            assertTrue(stkBody.contains("\"ok\":true"))
+            assertTrue(stkBody.contains("checkoutRequestId"))
+
+            // Verify pass granted automatically in sandbox mode
+            val passes = s.passes("f1")
+            assertTrue(passes.any { it.userId == "u-mpesa" })
+
+            // 2) Idempotent Callback check
+            val txId = s.insertTransaction("u-idem", null, "o1", 5.0, "KES", "checkout-idem-1")
+            val cb1 = c.post("/api/payments/callback") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"checkoutRequestId":"checkout-idem-1","resultCode":0}""")
+            }
+            assertEquals(HttpStatusCode.OK, cb1.status)
+            val initialPassesCount = s.passes("f1").count { it.userId == "u-idem" }
+            assertEquals(1, initialPassesCount)
+
+            // Second callback call with same CheckoutRequestID must NOT double grant
+            val cb2 = c.post("/api/payments/callback") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"checkoutRequestId":"checkout-idem-1","resultCode":0}""")
+            }
+            assertEquals(HttpStatusCode.OK, cb2.status)
+            assertTrue(cb2.bodyAsText().contains("alreadyProcessed"))
+            val duplicatePassesCount = s.passes("f1").count { it.userId == "u-idem" }
+            assertEquals(1, duplicatePassesCount) // Remains 1 pass!
+        }
+    }
+
+    @Test fun adminPaymentsReconciliationGate() {
+        testApplication {
+            application { relayModule(InMemoryStore(), "secret") }
+            val c = createClient { }
+
+            assertEquals(HttpStatusCode.Unauthorized, c.get("/admin/api/transactions").status)
+            assertEquals(HttpStatusCode.Unauthorized, c.post("/admin/api/transactions/tx-1/confirm").status)
+
+            assertEquals(HttpStatusCode.OK, c.get("/admin/api/transactions") { header("X-Admin-Key", "secret") }.status)
+        }
+    }
 }

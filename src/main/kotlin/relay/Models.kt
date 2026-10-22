@@ -19,11 +19,24 @@ import kotlinx.serialization.Serializable
 @Serializable data class UserStatusRequest(val status: String)
 @Serializable data class OfferCreate(val title: String, val price: Double, val verified: Boolean = true)
 @Serializable data class Agent(val slug: String, val name: String, val ownerPhone: String? = null, val active: Boolean = true)
-@Serializable data class Transaction(val id: String, val userId: String? = null, val agentSlug: String, val offerId: String, val amount: Double, val currency: String = "NGN", val status: String = "pending")
+@Serializable data class Transaction(
+    val id: String,
+    val userId: String? = null,
+    val agentSlug: String? = null,
+    val offerId: String,
+    val amount: Double,
+    val currency: String = "NGN",
+    val status: String = "pending",
+    val checkoutRequestId: String? = null,
+    val createdAt: String? = null
+)
 @Serializable data class AgentCreateRequest(val slug: String? = null, val name: String? = null, val ownerPhone: String? = null, val phone: String? = null)
 @Serializable data class BuyRequest(val offerId: String, val userId: String? = null)
 @Serializable data class AgentResponse(val slug: String, val name: String, val active: Boolean = true)
 @Serializable data class BuyResponse(val ok: Boolean = true, val transactionId: String, val status: String = "pending", val amount: Double)
+@Serializable data class StkRequest(val phone: String, val offerId: String, val userId: String? = null, val agentSlug: String? = null)
+@Serializable data class StkResponse(val ok: Boolean, val transactionId: String, val checkoutRequestId: String, val status: String = "pending")
+@Serializable data class CallbackResponse(val ResultCode: Int = 0, val ResultDesc: String = "Accepted", val alreadyProcessed: Boolean? = null)
 
 interface Store {
     suspend fun offers(): List<Offer>
@@ -43,8 +56,12 @@ interface Store {
     suspend fun createAgent(slug: String, name: String, ownerPhone: String? = null): Boolean = false
     suspend fun agentExists(slug: String): Boolean = false
     suspend fun offersForAgent(slug: String): List<Offer> = emptyList()
-    suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String = "NGN"): String = ""
-    suspend fun transactions(): List<Transaction> = emptyList()
+    suspend fun insertTransaction(userId: String?, agentSlug: String?, offerId: String, amount: Double, currency: String = "NGN", checkoutRequestId: String? = null): String = ""
+    suspend fun setTransactionStatus(id: String, status: String): Boolean = false
+    suspend fun findTransactionByCheckoutId(checkoutRequestId: String): Transaction? = null
+    suspend fun findTransactionById(id: String): Transaction? = null
+    suspend fun grantPass(userId: String, offerIdOrFeatureId: String): Pass? = null
+    suspend fun transactions(status: String? = null): List<Transaction> = emptyList()
     fun close() {}
 }
 
@@ -59,9 +76,9 @@ class InMemoryStore : Store {
         Feature("f1", "LIVE_SCORES", "Live Scores", "Real-time match scores"),
         Feature("f2", "AIRTIME", "Airtime Rewards", "Earn airtime")
     )
-    private val passes = mapOf(
-        "f1" to listOf(Pass("p1", "f1", "u1")),
-        "f2" to listOf(Pass("p2", "f2", "u1"))
+    private val passesMap = mutableMapOf(
+        "f1" to mutableListOf(Pass("p1", "f1", "u1")),
+        "f2" to mutableListOf(Pass("p2", "f2", "u1"))
     )
     private val users = mutableMapOf<String, Tokens>()
     private val userMeta = mutableMapOf<String, AdminUser>()
@@ -72,7 +89,7 @@ class InMemoryStore : Store {
     override suspend fun offers() = offersList.toList()
     override suspend fun features() = features
     override suspend fun featureByCode(code: String) = features.firstOrNull { it.code == code }
-    override suspend fun passes(featureId: String) = passes[featureId] ?: emptyList()
+    override suspend fun passes(featureId: String) = passesMap[featureId]?.toList() ?: emptyList()
     override suspend fun sendMessage(from: String, to: String, body: String): Message {
         val id = next("m"); return Message(id, from, to, body)
     }
@@ -126,11 +143,35 @@ class InMemoryStore : Store {
         return if (specific.isNotEmpty()) specific else offersList.filter { (it.agentSlug == slug || it.agentSlug == null) && it.verified }
     }
 
-    override suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String): String {
+    override suspend fun insertTransaction(userId: String?, agentSlug: String?, offerId: String, amount: Double, currency: String, checkoutRequestId: String?): String {
         val id = next("tx")
-        transactionsList.add(Transaction(id, userId, agentSlug, offerId, amount, currency, status = "pending"))
+        val now = java.time.Instant.now().toString()
+        transactionsList.add(Transaction(id, userId, agentSlug, offerId, amount, currency, status = "pending", checkoutRequestId = checkoutRequestId, createdAt = now))
         return id
     }
 
-    override suspend fun transactions(): List<Transaction> = transactionsList.toList()
+    override suspend fun setTransactionStatus(id: String, status: String): Boolean {
+        val idx = transactionsList.indexOfFirst { it.id == id || it.checkoutRequestId == id }
+        if (idx < 0) return false
+        transactionsList[idx] = transactionsList[idx].copy(status = status)
+        return true
+    }
+
+    override suspend fun findTransactionByCheckoutId(checkoutRequestId: String): Transaction? =
+        transactionsList.firstOrNull { it.checkoutRequestId == checkoutRequestId || it.id == checkoutRequestId }
+
+    override suspend fun findTransactionById(id: String): Transaction? =
+        transactionsList.firstOrNull { it.id == id || it.checkoutRequestId == id }
+
+    override suspend fun grantPass(userId: String, offerIdOrFeatureId: String): Pass {
+        val passId = next("p")
+        val featureId = features.firstOrNull { it.id == offerIdOrFeatureId || it.code == offerIdOrFeatureId }?.id ?: "f1"
+        val pass = Pass(passId, featureId, userId, active = true)
+        val list = passesMap.getOrPut(featureId) { mutableListOf() }
+        list.add(pass)
+        return pass
+    }
+
+    override suspend fun transactions(status: String?): List<Transaction> =
+        if (status.isNullOrBlank()) transactionsList.toList() else transactionsList.filter { it.status.equals(status, ignoreCase = true) }
 }

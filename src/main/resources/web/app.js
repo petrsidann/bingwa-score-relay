@@ -53,7 +53,7 @@ function initLogin() {
 }
 
 /* ---------- hash router ---------- */
-const routes = { overview: renderOverview, users: renderUsers, offers: renderOffers };
+const routes = { overview: renderOverview, users: renderUsers, offers: renderOffers, payments: renderPayments };
 function currentRoute() {
   const h = (location.hash || '#/overview').replace(/^#\/?/, '');
   return routes[h] ? h : 'overview';
@@ -270,6 +270,62 @@ async function renderUsers(el) {
         navigate();
       } catch (e) { toast('Failed: ' + e.message, 'err'); b.disabled = false; }
     });
+    tbody.appendChild(tr);
+  });
+}
+
+/* ================= PAYMENTS ================= */
+async function renderPayments(el) {
+  let txs;
+  try { txs = await api('/transactions'); } catch (e) { el.innerHTML = cardError(e); return; }
+  el.innerHTML =
+    '<div class="flex flex-wrap items-center justify-between gap-4">' +
+      '<div><h2 class="t-title text-slate-100">Payments & Reconciliation</h2>' +
+        '<p class="t-body text-slate-500">' + txs.length + ' total transactions \u00b7 M-Pesa STK push & manual fallback</p></div></div>' +
+    '<div class="card overflow-hidden"><div class="overflow-x-auto">' +
+      '<table class="tbl w-full"><thead><tr><th>Tx ID</th><th>Offer</th><th>Amount</th><th>Status</th>' +
+      '<th class="text-right">Actions</th></tr></thead><tbody id="txs-body"></tbody></table></div>' +
+      (txs.length ? '' : emptyState(ICONS.inbox, 'No transactions yet',
+        'Transactions created via M-Pesa STK push or storefront buy buttons will appear here.')) +
+    '</div>';
+  const tbody = $('#txs-body');
+  txs.forEach(t => {
+    const tr = document.createElement('tr');
+    const isPaid = t.status === 'paid';
+    const isFailed = t.status === 'failed';
+    const badgeClass = isPaid ? 'badge-ok' : (isFailed ? 'badge-bad' : 'badge-dim');
+    tr.innerHTML =
+      '<td class="font-medium text-slate-200"><code class="text-xs">' + esc(t.id) + '</code></td>' +
+      '<td>' + esc(t.offerId) + '</td>' +
+      '<td class="num">' + esc(t.currency || 'KES') + ' ' + Number(t.amount).toFixed(2) + '</td>' +
+      '<td><span class="badge ' + badgeClass + '"><span class="dot"></span>' + esc(t.status) + '</span></td>' +
+      '<td><div class="flex justify-end gap-2">' +
+        (!isPaid ? '<button class="btn btn-success confirm-btn" data-id="' + esc(t.id) + '">Confirm</button>' : '') +
+        (!isFailed ? '<button class="btn btn-danger fail-btn" data-id="' + esc(t.id) + '">Fail</button>' : '') +
+      '</div></td>';
+
+    const confirmBtn = tr.querySelector('.confirm-btn');
+    if (confirmBtn) {
+      confirmBtn.addEventListener('click', async (ev) => {
+        const b = ev.currentTarget; b.disabled = true;
+        try {
+          await api('/transactions/' + encodeURIComponent(b.dataset.id) + '/confirm', { method: 'POST' });
+          toast('Transaction confirmed & pass granted');
+          navigate();
+        } catch (e) { toast('Failed: ' + e.message, 'err'); b.disabled = false; }
+      });
+    }
+    const failBtn = tr.querySelector('.fail-btn');
+    if (failBtn) {
+      failBtn.addEventListener('click', async (ev) => {
+        const b = ev.currentTarget; b.disabled = true;
+        try {
+          await api('/transactions/' + encodeURIComponent(b.dataset.id) + '/fail', { method: 'POST' });
+          toast('Transaction marked failed');
+          navigate();
+        } catch (e) { toast('Failed: ' + e.message, 'err'); b.disabled = false; }
+      });
+    }
     tbody.appendChild(tr);
   });
 }
