@@ -3,6 +3,7 @@ package relay
 import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.sse.*
 import io.ktor.http.*
 import io.ktor.sse.ServerSentEvent
 import kotlinx.coroutines.delay

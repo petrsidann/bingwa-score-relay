@@ -4,26 +4,38 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.sql.Connection
 
-class PostgresStore(private val url: String) : Store {
+/**
+ * Relay 13 repository seam: full Store implementation over Postgres.
+ * On first connection it applies db/schema.sql (versioned + idempotent — safe every boot).
+ * Only constructed by StoreFactory when DB_URL is set; tests use applySchemaAtBoot=false
+ * to avoid connecting.
+ */
+class PostgresStore(
+    private val url: String,
+    private val applySchemaAtBoot: Boolean = true
+) : Store {
     private var conn: Connection? = null
+
+    /** Statements from schema.sql, comments stripped, split on ';'. */
+    internal fun schemaStatements(): List<String> {
+        val raw = javaClass.getResourceAsStream("/db/schema.sql")
+            ?.readBytes()?.decodeToString()
+            ?: error("db/schema.sql missing from classpath")
+        return raw.lines().filterNot { it.trim().startsWith("--") }.joinToString("\n")
+            .split(";").map { it.trim() }.filter { it.isNotEmpty() }
+    }
 
     private fun c(): Connection {
         conn?.takeIf { !it.isClosed }?.let { return it }
         val n = java.sql.DriverManager.getConnection(url)
         conn = n
-        n.createStatement().use { s ->
-            s.execute("CREATE TABLE IF NOT EXISTS offers(id TEXT PRIMARY KEY,title TEXT,price DOUBLE PRECISION,verified BOOLEAN)")
-            s.execute("CREATE TABLE IF NOT EXISTS features(id TEXT PRIMARY KEY,code TEXT,name TEXT,description TEXT)")
-            s.execute("CREATE TABLE IF NOT EXISTS passes(id TEXT PRIMARY KEY,feature_id TEXT,user_id TEXT,active BOOLEAN)")
-            s.execute("CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY,phone TEXT,access_token TEXT,refresh_token TEXT,expires_at TEXT)")
-            s.execute("CREATE TABLE IF NOT EXISTS otps(phone TEXT PRIMARY KEY,code TEXT)")
-            s.execute("CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,from_id TEXT,to_id TEXT,body TEXT)")
-            s.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT")
-            s.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT")
-            // seed
-            s.execute("INSERT INTO offers VALUES('o1','Starter Pack',5.0,true),('o2','Pro Season',20.0,true) ON CONFLICT DO NOTHING")
-            s.execute("INSERT INTO features VALUES('f1','LIVE_SCORES','Live Scores','Real-time'),('f2','AIRTIME','Airtime Rewards','Earn airtime') ON CONFLICT DO NOTHING")
-            s.execute("INSERT INTO passes VALUES('p1','f1','u1',true),('p2','f2','u1',true) ON CONFLICT DO NOTHING")
+        if (applySchemaAtBoot) {
+            n.autoCommit = false
+            n.createStatement().use { s ->
+                for (st in schemaStatements()) s.execute(st)
+            }
+            n.commit()
+            n.autoCommit = true
         }
         return n
     }
@@ -69,9 +81,8 @@ class PostgresStore(private val url: String) : Store {
     override suspend fun signUp(phone: String) = withContext(Dispatchers.IO) {
         val t = Tokens("u-" + System.nanoTime(), phone, "at-" + System.nanoTime(), "rt-" + System.nanoTime(),
             java.time.Instant.now().plusSeconds(3600).toString())
-        c().prepareStatement("INSERT INTO users VALUES(?,?,?,?,?,?,?)").apply {
+        c().prepareStatement("INSERT INTO users(user_id,phone,access_token,refresh_token,expires_at) VALUES(?,?,?,?,?)").apply {
             setString(1, t.userId); setString(2, t.phone); setString(3, t.accessToken); setString(4, t.refreshToken); setString(5, t.expiresAt)
-            setString(6, java.time.Instant.now().toString()); setString(7, "active")
         }.executeUpdate()
         t
     }
@@ -119,10 +130,48 @@ class PostgresStore(private val url: String) : Store {
 
     override suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer = withContext(Dispatchers.IO) {
         val o = Offer("o-" + System.nanoTime(), title, price, verified)
-        c().prepareStatement("INSERT INTO offers VALUES(?,?,?,?)").apply {
+        c().prepareStatement("INSERT INTO offers(id,title,price,verified) VALUES(?,?,?,?)").apply {
             setString(1, o.id); setString(2, o.title); setDouble(3, o.price); setBoolean(4, o.verified)
         }.executeUpdate()
         o
+    }
+
+    // ---- helpers used by Relay 15 (store generator) & audit ----
+    /** Insert a transaction row (status defaults to 'pending'). */
+    suspend fun insertTransaction(userId: String?, agentSlug: String, offerId: String, amount: Double, currency: String = "NGN"): String =
+        withContext(Dispatchers.IO) {
+            val id = "tx-" + System.nanoTime()
+            c().prepareStatement("INSERT INTO transactions(id,user_id,agent_slug,offer_id,amount,currency,status) VALUES(?,?,?,?,?,?, 'pending')").apply {
+                setString(1, id); userId?.let { setString(2, it) } ?: setNull(2, java.sql.Types.NULL)
+                setString(3, agentSlug); setString(4, offerId); setDouble(5, amount); setString(6, currency)
+            }.executeUpdate()
+            id
+        }
+
+    /** Verified offers belonging to one agent storefront. */
+    suspend fun offersForAgent(slug: String): List<Offer> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id,title,price,verified FROM offers WHERE agent_slug=? AND verified=true").apply {
+            setString(1, slug)
+        }.executeQuery().let { rs -> buildList { while (rs.next()) add(Offer(rs.getString(1), rs.getString(2), rs.getDouble(3), rs.getBoolean(4))) } }
+    }
+
+    suspend fun agentExists(slug: String): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT 1 FROM agents WHERE slug=? AND active=true").apply { setString(1, slug) }
+            .executeQuery().next()
+    }
+
+    suspend fun createAgent(slug: String, name: String, ownerPhone: String?): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("INSERT INTO agents(slug,name,owner_phone) VALUES(?,?,?) ON CONFLICT (slug) DO NOTHING").apply {
+            setString(1, slug); setString(2, name); ownerPhone?.let { setString(3, it) } ?: setNull(3, java.sql.Types.NULL)
+        }.executeUpdate() > 0
+    }
+
+    suspend fun recordAudit(action: String, detail: String) = withContext(Dispatchers.IO) {
+        try {
+            c().prepareStatement("INSERT INTO audit(action,detail) VALUES(?,?)").apply {
+                setString(1, action); setString(2, detail)
+            }.executeUpdate()
+        } catch (_: Exception) { /* audit is best-effort; in-memory log remains authoritative */ }
     }
 
     override suspend fun setOfferVerified(id: String, verified: Boolean): Boolean = withContext(Dispatchers.IO) {
