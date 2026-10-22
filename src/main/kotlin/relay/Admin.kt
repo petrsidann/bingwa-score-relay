@@ -53,7 +53,7 @@ object WsRegistry {
 }
 
 /** Shared admin gate: ADMIN_KEY (falls back to RELAY_SERVER_KEY) via X-Admin-Key header or ?key=. */
-fun io.ktor.server.routing.RouteIntercepting.gateAdmin(serverKey: String?) {
+fun io.ktor.server.routing.Route.gateAdmin(serverKey: String?) {
     val adminKey = env("ADMIN_KEY") ?: serverKey
     intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
         val provided = call.request.headers["X-Admin-Key"]
@@ -86,6 +86,11 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
             // ---- JSON API for a future web UI ----
             route("/api") {
                 get("/users") { AdminState.count("GET /admin/api/users"); call.respond(store.users()) }
+                get("/metrics/history") {
+                    AdminState.count("GET /admin/api/metrics/history")
+                    MetricsRing.catchUp()
+                    call.respond(MetricsRing.snapshot())
+                }
                 post("/users/{id}/status") {
                     AdminState.count("POST /admin/api/users/{id}/status")
                     val id = call.parameters["id"] ?: ""
