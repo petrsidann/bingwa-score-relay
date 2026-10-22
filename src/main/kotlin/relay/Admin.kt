@@ -58,6 +58,7 @@ fun io.ktor.server.routing.Route.gateAdmin(serverKey: String?) {
     intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
         val provided = call.request.headers["X-Admin-Key"]
             ?: call.request.queryParameters["key"]
+            ?: call.request.headers["X-Server-Key"]
         if (adminKey.isNullOrBlank() || provided != adminKey) {
             call.respond(HttpStatusCode.Unauthorized, ApiError("bad_admin_key"))
             finish()
@@ -100,6 +101,17 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
                     if (ok) call.respond(OkResult(true)) else call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
                 }
                 get("/offers") { AdminState.count("GET /admin/api/offers"); call.respond(store.offers()) }
+                post("/agents") {
+                    AdminState.count("POST /admin/api/agents")
+                    val req = try { call.receive<AgentCreateRequest>() } catch (_: Exception) { AgentCreateRequest() }
+                    val slug = req.slug?.ifBlank { null }
+                        ?: req.name?.lowercase()?.replace(Regex("[^a-z0-9]+"), "-")?.trim('-')?.ifBlank { null }
+                        ?: "agent-${System.currentTimeMillis()}"
+                    val name = req.name?.ifBlank { null } ?: slug
+                    val phone = req.ownerPhone ?: req.phone
+                    store.createAgent(slug, name, phone)
+                    call.respond(AgentResponse(slug, name, active = true))
+                }
                 post("/offers") {
                     AdminState.count("POST /admin/api/offers")
                     val r = call.receive<OfferCreate>()
