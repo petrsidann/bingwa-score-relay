@@ -39,10 +39,10 @@ object MetricsRing {
     }
 }
 
-fun Application.metricsRoutes() {
+fun Application.metricsRoutes(serverKey: String?) {
     routing {
         route("/admin") {
-            gateAdmin()
+            gateAdmin(serverKey)
             route("/api") {
                 get("/metrics/history") {
                     AdminState.count("GET /admin/api/metrics/history")

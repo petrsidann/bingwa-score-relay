@@ -20,7 +20,9 @@ class SchemaTest {
 
     @Test fun allTablesDeclared() {
         for (t in tables) {
-            assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS $t(", ignoreCase = true), "missing table: $t")
+            val exists = sql.contains("CREATE TABLE IF NOT EXISTS $t(", ignoreCase = true) ||
+                         sql.contains("CREATE TABLE IF NOT EXISTS $t (", ignoreCase = true)
+            assertTrue(exists, "missing table: $t")
         }
     }
 

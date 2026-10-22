@@ -59,6 +59,7 @@ fun Application.relayModule(store: Store, serverKey: String?) {
         }
         relaySocketAndSse()
         adminRoutes(store, serverKey)
+        metricsRoutes(serverKey)
     }
 }
 
