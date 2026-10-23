@@ -73,5 +73,16 @@ class HardeningTest {
         assertTrue(rl.allow("5.6.7.8"), "different client unaffected")
     }
 
+    @Test fun requestIdHeaderPresent() {
+        testApplication {
+            application { relayModule(InMemoryStore(), null) }
+            val c = createClient { }
+            val res = c.get("/healthz")
+            assertEquals(HttpStatusCode.OK, res.status)
+            assertNotNull(res.headers["X-Request-ID"])
+            assertTrue(res.headers["X-Request-ID"]!!.startsWith("req-"))
+        }
+    }
+
     private fun runBlockingUnit(block: suspend () -> Unit) = kotlinx.coroutines.runBlocking { block() }
 }

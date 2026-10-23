@@ -10,7 +10,15 @@ fun main() {
     val store = StoreFactory.fromEnv()
     val serverKey = env("RELAY_SERVER_KEY")
     println("Bingwa Relay starting on :$port storage=${store.javaClass.simpleName} keyAuth=${serverKey != null}")
-    embeddedServer(Netty, port = port, host = "0.0.0.0") {
+    val server = embeddedServer(Netty, port = port, host = "0.0.0.0") {
         relayModule(store, serverKey)
-    }.start(wait = true)
+    }
+
+    Runtime.getRuntime().addShutdownHook(Thread {
+        println("Bingwa Relay shutting down gracefully...")
+        server.stop(gracePeriodMillis = 1000, timeoutMillis = 5000)
+        store.close()
+    })
+
+    server.start(wait = true)
 }

@@ -18,11 +18,14 @@ fun Application.installCors() {
     }
 }
 
-/** Minimal access logger: method + path per request. */
+/** Request-ID logging & header response per request. */
 fun Application.installRequestLogging() {
     val accessLog = org.slf4j.LoggerFactory.getLogger("relay.access")
     intercept(ApplicationCallPipeline.Plugins) {
-        accessLog.info("access {} {}", call.request.httpMethod.value, call.request.path())
+        val reqId = call.request.headers["X-Request-ID"]
+            ?: ("req-" + java.util.UUID.randomUUID().toString().replace("-", "").take(8))
+        call.response.header("X-Request-ID", reqId)
+        accessLog.info("access [{}] {} {}", reqId, call.request.httpMethod.value, call.request.path())
     }
 }
 
@@ -42,7 +45,7 @@ class RateLimitStub(val perMinute: Int) {
 fun Application.installAuthRateLimit(store: RateLimitStub) {
     intercept(ApplicationCallPipeline.Plugins) {
         val path = call.request.path()
-        if (path.startsWith("/api/auth/")) {
+        if (path.startsWith("/api/auth/") || path.startsWith("/api/payments/")) {
             val key = call.request.local.remoteHost
             if (!store.allow(key)) {
                 call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited"))
