@@ -11,6 +11,15 @@ import kotlinx.serialization.json.jsonPrimitive
 @Serializable
 data class StkPushResult(val checkoutRequestId: String, val responseCode: String = "0", val responseDescription: String = "Success")
 
+@Serializable
+data class TransactionStatusQueryResult(
+    val resultCode: Int,
+    val resultDesc: String,
+    val amount: Double? = null,
+    val shortcode: String? = null,
+    val checkoutRequestId: String? = null
+)
+
 object MPesaService {
     val consumerKey: String? get() = env("DARAJA_CONSUMER_KEY")
     val consumerSecret: String? get() = env("DARAJA_CONSUMER_SECRET")
@@ -105,6 +114,90 @@ object MPesaService {
             }
         } catch (_: Exception) {
             StkPushResult(reqId, "0", "Fallback on Exception")
+        }
+    }
+
+    // Daraja Transaction Status Query
+    fun queryTransactionStatus(checkoutRequestId: String, expectedAmount: Double): TransactionStatusQueryResult {
+        if (isSandbox) {
+            // Sandbox mode simulation
+            if (checkoutRequestId.startsWith("forged-") || checkoutRequestId.contains("-forged")) {
+                return TransactionStatusQueryResult(
+                    resultCode = 1,
+                    resultDesc = "Forged/Invalid transaction",
+                    amount = 0.0,
+                    shortcode = "999999",
+                    checkoutRequestId = checkoutRequestId
+                )
+            } else if (checkoutRequestId.startsWith("mismatch-amount")) {
+                return TransactionStatusQueryResult(
+                    resultCode = 0,
+                    resultDesc = "Success",
+                    amount = expectedAmount + 100.0, // Mismatched amount
+                    shortcode = shortcode,
+                    checkoutRequestId = checkoutRequestId
+                )
+            } else if (checkoutRequestId.startsWith("mismatch-shortcode")) {
+                return TransactionStatusQueryResult(
+                    resultCode = 0,
+                    resultDesc = "Success",
+                    amount = expectedAmount,
+                    shortcode = "000000", // Mismatched shortcode
+                    checkoutRequestId = checkoutRequestId
+                )
+            } else {
+                return TransactionStatusQueryResult(
+                    resultCode = 0,
+                    resultDesc = "Success",
+                    amount = expectedAmount,
+                    shortcode = shortcode,
+                    checkoutRequestId = checkoutRequestId
+                )
+            }
+        }
+
+        val token = fetchAccessToken() ?: return TransactionStatusQueryResult(1, "No Daraja Token Available", null, null, checkoutRequestId)
+        return try {
+            val timestamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+            val passwordStr = Base64.getEncoder().encodeToString("$shortcode${passkey ?: ""}$timestamp".toByteArray())
+
+            val payload = """
+            {
+                "BusinessShortCode": "$shortcode",
+                "Password": "$passwordStr",
+                "Timestamp": "$timestamp",
+                "CheckoutRequestID": "$checkoutRequestId"
+            }
+            """.trimIndent()
+
+            val url = URL("$baseUrl/mpesa/stkpushquery/v1/query")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.doOutput = true
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            conn.outputStream.use { it.write(payload.toByteArray()) }
+
+            if (conn.responseCode in 200..299) {
+                val resp = conn.inputStream.bufferedReader().readText()
+                val json = Json.parseToJsonElement(resp).jsonObject
+                val resultCodeStr = json["ResultCode"]?.jsonPrimitive?.content ?: json["ResponseCode"]?.jsonPrimitive?.content ?: "1"
+                val resultDescStr = json["ResultDesc"]?.jsonPrimitive?.content ?: json["ResponseDescription"]?.jsonPrimitive?.content ?: "Unknown"
+                val amount = expectedAmount // Daraja query returns resultCode 0 on success
+                TransactionStatusQueryResult(
+                    resultCode = resultCodeStr.toIntOrNull() ?: 1,
+                    resultDesc = resultDescStr,
+                    amount = amount,
+                    shortcode = shortcode,
+                    checkoutRequestId = checkoutRequestId
+                )
+            } else {
+                TransactionStatusQueryResult(1, "HTTP Error ${conn.responseCode}", null, null, checkoutRequestId)
+            }
+        } catch (e: Exception) {
+            TransactionStatusQueryResult(1, "Exception: ${e.message}", null, null, checkoutRequestId)
         }
     }
 

@@ -16,6 +16,16 @@ import kotlinx.serialization.Serializable
 @Serializable data class OtpSent(val ok: Boolean, val devCode: String)
 @Serializable data class ApiError(val error: String)
 @Serializable data class AdminUser(val id: String, val phone: String, val createdAt: String, val status: String)
+
+@Serializable data class UserDetail(
+    val user: AdminUser,
+    val passes: List<Pass>,
+    val transactions: List<Transaction>,
+    val activePlan: String = "Free"
+)
+
+@Serializable data class SubscribeRequest(val offerId: String, val phone: String? = null)
+@Serializable data class SubscribeResponse(val ok: Boolean, val checkoutRequestId: String, val transactionId: String, val status: String = "pending")
 @Serializable data class UserStatusRequest(val status: String)
 @Serializable data class OfferCreate(val title: String, val price: Double, val verified: Boolean = true)
 @Serializable data class Agent(val slug: String, val name: String, val ownerPhone: String? = null, val active: Boolean = true)
@@ -61,6 +71,8 @@ interface Store {
     suspend fun findTransactionByCheckoutId(checkoutRequestId: String): Transaction? = null
     suspend fun findTransactionById(id: String): Transaction? = null
     suspend fun grantPass(userId: String, offerIdOrFeatureId: String): Pass? = null
+    suspend fun passesForUser(userId: String): List<Pass> = emptyList()
+    suspend fun transactionsForUser(userId: String): List<Transaction> = emptyList()
     suspend fun transactions(status: String? = null): List<Transaction> = emptyList()
     fun close() {}
 }
@@ -95,7 +107,7 @@ class InMemoryStore : Store {
     }
     override suspend fun signIn(phone: String): Tokens? = users["u:$phone"]
     override suspend fun signUp(phone: String): Tokens {
-        val t = Tokens(next("u"), phone, next("at"), next("rt"), java.time.Instant.now().plusSeconds(3600).toString())
+        val t = Tokens(next("u"), phone, next("at"), next("rt"), java.time.Instant.now().plusSeconds(12 * 3600).toString())
         users["u:$phone"] = t; users["rt:${t.refreshToken}"] = t
         userMeta[t.userId] = AdminUser(t.userId, phone, java.time.Instant.now().toString(), "active")
         return t
@@ -107,8 +119,15 @@ class InMemoryStore : Store {
         if (otps[phone] == code) users["u:$phone"] ?: signUp(phone).also { otps.remove(phone) } else null
     override suspend fun refresh(refreshToken: String): Tokens? {
         val old = users["rt:$refreshToken"] ?: return null
-        val t = old.copy(accessToken = next("at"), refreshToken = next("rt"))
-        users["u:${t.phone}"] = t; users["rt:${t.refreshToken}"] = t; return t
+        users.remove("rt:$refreshToken")
+        val t = old.copy(
+            accessToken = next("at"),
+            refreshToken = next("rt"),
+            expiresAt = java.time.Instant.now().plusSeconds(12 * 3600).toString()
+        )
+        users["u:${t.phone}"] = t
+        users["rt:${t.refreshToken}"] = t
+        return t
     }
 
     override suspend fun users(): List<AdminUser> = userMeta.values.sortedBy { it.createdAt }
@@ -171,6 +190,12 @@ class InMemoryStore : Store {
         list.add(pass)
         return pass
     }
+
+    override suspend fun passesForUser(userId: String): List<Pass> =
+        passesMap.values.flatten().filter { it.userId == userId }
+
+    override suspend fun transactionsForUser(userId: String): List<Transaction> =
+        transactionsList.filter { it.userId == userId }
 
     override suspend fun transactions(status: String?): List<Transaction> =
         if (status.isNullOrBlank()) transactionsList.toList() else transactionsList.filter { it.status.equals(status, ignoreCase = true) }

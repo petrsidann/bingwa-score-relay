@@ -232,46 +232,124 @@ async function renderUsers(el) {
   let users;
   try { users = await api('/users'); } catch (e) { el.innerHTML = cardError(e); return; }
   el.innerHTML =
-    '<div class="flex flex-wrap items-center justify-between gap-4">' +
-      '<div><h2 class="t-title text-slate-100">Users</h2>' +
+    '<div class="flex flex-wrap items-center justify-between gap-4 mb-4">' +
+      '<div><h2 class="t-title text-slate-100">Users Intelligence</h2>' +
         '<p class="t-body text-slate-500">' + users.length + ' registered ' + (users.length === 1 ? 'account' : 'accounts') +
-        ' \u00b7 kill switch disables an account instantly</p></div>' +
-      '<a class="btn btn-primary" href="/admin/api/export/users.csv?key=' + encodeURIComponent(KEY) + '">' +
-        '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>' +
-        'Export CSV</a></div>' +
+        ' \u00b7 click row or Details to inspect full history</p></div>' +
+      '<div class="flex items-center gap-3">' +
+        '<input id="user-search" type="text" placeholder="Search user ID or phone..." class="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500">' +
+        '<a class="btn btn-primary" href="/admin/api/export/users.csv?key=' + encodeURIComponent(KEY) + '">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>' +
+          'Export CSV</a>' +
+      '</div></div>' +
     '<div class="card overflow-hidden"><div class="overflow-x-auto">' +
       '<table class="tbl w-full"><thead><tr><th>User</th><th>Phone</th><th>Created</th><th>Status</th>' +
-      '<th class="text-right">Kill switch</th></tr></thead><tbody id="users-body"></tbody></table></div>' +
+      '<th class="text-right">Actions</th></tr></thead><tbody id="users-body"></tbody></table></div>' +
       (users.length ? '' : emptyState(ICONS.users, 'No registered users yet',
         'Accounts appear here after the first successful sign-up via POST /api/auth/sign-up.')) +
+    '</div>' +
+    '<!-- Detail Drawer -->' +
+    '<div id="user-drawer" class="hidden fixed inset-y-0 right-0 z-50 w-full max-w-md bg-slate-900 border-l border-slate-800 p-6 shadow-2xl overflow-y-auto">' +
+      '<div class="flex items-center justify-between mb-6">' +
+        '<h3 class="text-lg font-bold text-slate-100">User Intelligence Detail</h3>' +
+        '<button id="close-drawer" class="text-slate-400 hover:text-slate-100 text-xl font-bold">&times;</button>' +
+      '</div>' +
+      '<div id="drawer-content" class="space-y-6"></div>' +
     '</div>';
+
   const tbody = $('#users-body');
-  users.forEach(u => {
-    const tr = document.createElement('tr');
-    const active = u.status === 'active';
-    tr.innerHTML =
-      '<td class="font-medium text-slate-200">' + esc(u.id) + '</td>' +
-      '<td class="num">' + esc(u.phone) + '</td>' +
-      '<td class="text-slate-500">' + esc((u.createdAt || '').slice(0, 10)) + '</td>' +
-      '<td><span class="badge ' + (active ? 'badge-ok' : 'badge-bad') + '"><span class="dot"></span>' + esc(u.status) + '</span></td>' +
-      '<td><div class="flex justify-end">' +
-        '<button class="btn ' + (active ? 'btn-danger' : 'btn-success') + '" data-id="' + esc(u.id) + '" data-active="' + active + '">' +
-        (active ? 'Disable' : 'Reactivate') + '</button></div></td>';
-    tr.querySelector('button').addEventListener('click', async (ev) => {
-      const b = ev.currentTarget;
-      b.disabled = true;
-      try {
-        await api('/users/' + encodeURIComponent(b.dataset.id) + '/status', {
-          method: 'POST', contentType: 'application/json',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: b.dataset.active === 'true' ? 'disabled' : 'active' })
-        });
-        toast(b.dataset.active === 'true' ? 'User disabled' : 'User reactivated');
-        navigate();
-      } catch (e) { toast('Failed: ' + e.message, 'err'); b.disabled = false; }
+  const renderRows = (filter = '') => {
+    tbody.innerHTML = '';
+    const q = filter.toLowerCase().trim();
+    const filtered = users.filter(u => u.id.toLowerCase().includes(q) || u.phone.toLowerCase().includes(q));
+    filtered.forEach(u => {
+      const tr = document.createElement('tr');
+      tr.className = 'cursor-pointer hover:bg-slate-800/50 transition-colors';
+      const active = u.status === 'active';
+      tr.innerHTML =
+        '<td class="font-medium text-slate-200">' + esc(u.id) + '</td>' +
+        '<td class="num">' + esc(u.phone) + '</td>' +
+        '<td class="text-slate-500">' + esc((u.createdAt || '').slice(0, 10)) + '</td>' +
+        '<td><span class="badge ' + (active ? 'badge-ok' : 'badge-bad') + '"><span class="dot"></span>' + esc(u.status) + '</span></td>' +
+        '<td><div class="flex justify-end gap-2">' +
+          '<button class="btn btn-primary detail-btn" data-id="' + esc(u.id) + '">Details</button>' +
+          '<button class="btn ' + (active ? 'btn-danger' : 'btn-success') + ' kill-btn" data-id="' + esc(u.id) + '" data-active="' + active + '">' +
+          (active ? 'Disable' : 'Reactivate') + '</button></div></td>';
+
+      tr.querySelector('.detail-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openUserDrawer(u.id);
+      });
+
+      tr.querySelector('.kill-btn').addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const b = ev.currentTarget;
+        b.disabled = true;
+        try {
+          await api('/users/' + encodeURIComponent(b.dataset.id) + '/status', {
+            method: 'POST', contentType: 'application/json',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: b.dataset.active === 'true' ? 'disabled' : 'active' })
+          });
+          toast(b.dataset.active === 'true' ? 'User disabled' : 'User reactivated');
+          navigate();
+        } catch (e) { toast('Failed: ' + e.message, 'err'); b.disabled = false; }
+      });
+
+      tr.addEventListener('click', () => openUserDrawer(u.id));
+      tbody.appendChild(tr);
     });
-    tbody.appendChild(tr);
-  });
+  };
+
+  renderRows();
+
+  $('#user-search').addEventListener('input', (e) => renderRows(e.target.value));
+  $('#close-drawer').addEventListener('click', () => $('#user-drawer').classList.add('hidden'));
+}
+
+async function openUserDrawer(userId) {
+  const drawer = $('#user-drawer');
+  const content = $('#drawer-content');
+  drawer.classList.remove('hidden');
+  content.innerHTML = '<div class="sk" style="height:12rem"></div>';
+
+  try {
+    const detail = await api('/users/' + encodeURIComponent(userId));
+    const u = detail.user;
+    const passes = detail.passes || [];
+    const txs = detail.transactions || [];
+
+    content.innerHTML =
+      '<div class="bg-slate-800/60 p-4 rounded-xl border border-slate-700/60 space-y-2">' +
+        '<p class="t-micro text-slate-500">Identity</p>' +
+        '<p class="text-sm text-slate-200"><strong>ID:</strong> ' + esc(u.id) + '</p>' +
+        '<p class="text-sm text-slate-200"><strong>Phone:</strong> ' + esc(u.phone) + '</p>' +
+        '<p class="text-sm text-slate-200"><strong>Status:</strong> ' + esc(u.status) + '</p>' +
+        '<p class="text-sm text-slate-200"><strong>Active Plan:</strong> <span class="badge badge-ok">' + esc(detail.activePlan) + '</span></p>' +
+      '</div>' +
+
+      '<div class="space-y-2">' +
+        '<h4 class="text-sm font-semibold text-slate-300">Active Passes / Credits (' + passes.length + ')</h4>' +
+        (passes.length ? passes.map(p =>
+          '<div class="bg-slate-800/40 p-3 rounded-lg border border-slate-800 text-xs text-slate-300 flex justify-between">' +
+            '<span>Feature ID: ' + esc(p.featureId) + '</span>' +
+            '<span class="badge badge-ok">Active</span>' +
+          '</div>'
+        ).join('') : '<p class="text-xs text-slate-500">No active passes granted.</p>') +
+      '</div>' +
+
+      '<div class="space-y-2">' +
+        '<h4 class="text-sm font-semibold text-slate-300">Payment & Transaction History (' + txs.length + ')</h4>' +
+        (txs.length ? txs.map(t =>
+          '<div class="bg-slate-800/40 p-3 rounded-lg border border-slate-800 text-xs space-y-1">' +
+            '<div class="flex justify-between font-mono text-slate-200"><span>' + esc(t.id) + '</span><span>' + esc(t.currency) + ' ' + t.amount + '</span></div>' +
+            '<div class="flex justify-between text-slate-500"><span>Offer: ' + esc(t.offerId) + '</span><span>Status: ' + esc(t.status) + '</span></div>' +
+          '</div>'
+        ).join('') : '<p class="text-xs text-slate-500">No transactions recorded.</p>') +
+      '</div>';
+  } catch (e) {
+    content.innerHTML = '<p class="text-rose-500 text-sm">Failed to load user detail: ' + esc(e.message) + '</p>';
+  }
 }
 
 /* ================= PAYMENTS ================= */

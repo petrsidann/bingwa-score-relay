@@ -87,6 +87,19 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
             // ---- JSON API for a future web UI ----
             route("/api") {
                 get("/users") { AdminState.count("GET /admin/api/users"); call.respond(store.users()) }
+                get("/users/{id}") {
+                    AdminState.count("GET /admin/api/users/{id}")
+                    val id = call.parameters["id"] ?: ""
+                    val user = store.users().firstOrNull { it.id == id }
+                    if (user == null) {
+                        call.respond(HttpStatusCode.NotFound, ApiError("user_not_found"))
+                    } else {
+                        val passes = store.passesForUser(id)
+                        val txs = store.transactionsForUser(id)
+                        val activePlan = if (passes.isNotEmpty()) "Pro Pass" else "Free"
+                        call.respond(UserDetail(user = user, passes = passes, transactions = txs, activePlan = activePlan))
+                    }
+                }
                 get("/metrics/history") {
                     AdminState.count("GET /admin/api/metrics/history")
                     MetricsRing.catchUp()

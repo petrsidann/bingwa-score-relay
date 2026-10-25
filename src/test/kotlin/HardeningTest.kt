@@ -67,10 +67,159 @@ class HardeningTest {
     }
 
     @Test fun rateLimitStubAllowsThenBlocks() {
-        val rl = RateLimitStub(perMinute = 3)
-        repeat(3) { assertTrue(rl.allow("1.2.3.4"), "request $it should be allowed") }
-        assertFalse(rl.allow("1.2.3.4"), "4th request in window should be blocked")
-        assertTrue(rl.allow("5.6.7.8"), "different client unaffected")
+        val rl = AuthRateLimiter(maxTokens = 3)
+        repeat(3) { assertTrue(rl.checkAndConsume("1.2.3.4").first, "request $it should be allowed") }
+        assertFalse(rl.checkAndConsume("1.2.3.4").first, "4th request in window should be blocked")
+        assertTrue(rl.checkAndConsume("5.6.7.8").first, "different client unaffected")
+    }
+
+    @Test fun sqliPayloadsReturn400or401Never500() {
+        testApplication {
+            application { relayModule(InMemoryStore(), "secret-key") }
+            val c = createClient { }
+
+            val sqliPayloads = listOf(
+                "' OR 1=1--",
+                "\"; DROP TABLE users;--",
+                "' UNION SELECT 1, 'hacked', 3--",
+                "admin' --"
+            )
+
+            for (payload in sqliPayloads) {
+                // Auth sign-in expects phone lookup
+                val authRes = c.post("/api/auth/sign-in") {
+                    header("X-Server-Key", "secret-key")
+                    contentType(ContentType.Application.Json)
+                    setBody("""{"phone":"$payload"}""")
+                }
+                assertNotEquals(HttpStatusCode.InternalServerError, authRes.status, "SQLi in sign-in returned 500!")
+                assertTrue(authRes.status == HttpStatusCode.Unauthorized || authRes.status == HttpStatusCode.BadRequest, "Expected 400/401 for SQLi in sign-in")
+
+                // Store slug
+                val encodedPayload = java.net.URLEncoder.encode(payload, "UTF-8")
+                val storeRes = c.get("/store/$encodedPayload")
+                assertNotEquals(HttpStatusCode.InternalServerError, storeRes.status, "SQLi in store slug returned 500!")
+                assertEquals(HttpStatusCode.NotFound, storeRes.status, "Expected 404 Not Found for non-existent agent slug")
+            }
+        }
+    }
+
+    @Test fun headlessBotFilterBlocksBotUserAgents() {
+        testApplication {
+            application { relayModule(InMemoryStore(), null) }
+            val c = createClient { }
+
+            val botUas = listOf(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/90.0.4430.212 Safari/537.36",
+                "Puppeteer 10.0.0",
+                "Playwright/1.12.0",
+                "Selenium/4.0.0",
+                "PhantomJS/2.1.1"
+            )
+
+            for (botUa in botUas) {
+                val res = c.get("/healthz") {
+                    header(HttpHeaders.UserAgent, botUa)
+                }
+                assertEquals(HttpStatusCode.Forbidden, res.status, "Headless bot UA $botUa was not blocked!")
+                assertTrue(res.bodyAsText().contains("bot_detected"))
+            }
+
+            // Normal UA should pass
+            val normalRes = c.get("/healthz") {
+                header(HttpHeaders.UserAgent, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+            }
+            assertEquals(HttpStatusCode.OK, normalRes.status)
+        }
+    }
+
+    @Test fun securityHeadersPresent() {
+        testApplication {
+            application { relayModule(InMemoryStore(), "secret-key") }
+            val c = createClient { }
+
+            val healthRes = c.get("/healthz")
+            assertEquals("max-age=31536000; includeSubDomains", healthRes.headers["Strict-Transport-Security"])
+            assertEquals("nosniff", healthRes.headers["X-Content-Type-Options"])
+            assertEquals("DENY", healthRes.headers["X-Frame-Options"])
+
+            val adminRes = c.get("/admin") { header("X-Admin-Key", "secret-key") }
+            assertEquals(HttpStatusCode.OK, adminRes.status)
+            assertNotNull(adminRes.headers["Content-Security-Policy"])
+            assertTrue(adminRes.headers["Content-Security-Policy"]!!.contains("default-src 'self'"))
+        }
+    }
+
+    @Test fun darajaCallbackVerificationHonestAndForged() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryStore()
+        testApplication {
+            application { relayModule(store, "secret-key") }
+            val c = createClient { }
+
+            // Honest transaction
+            val honestTxId = store.insertTransaction("u-honest", null, "o1", 5.0, "KES", "checkout-honest-1")
+            val honestCb = c.post("/api/payments/callback") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"checkoutRequestId":"checkout-honest-1","resultCode":0}""")
+            }
+            assertEquals(HttpStatusCode.OK, honestCb.status)
+            assertEquals("paid", store.findTransactionById(honestTxId)?.status)
+            assertTrue(store.passesForUser("u-honest").isNotEmpty())
+
+            // Forged transaction (fake checkout id prefix triggers sandbox forged detection)
+            val forgedTxId = store.insertTransaction("u-forged", null, "o1", 5.0, "KES", "forged-checkout-99")
+            val forgedCb = c.post("/api/payments/callback") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"checkoutRequestId":"forged-checkout-99","resultCode":0}""")
+            }
+            assertEquals(HttpStatusCode.BadRequest, forgedCb.status)
+            assertEquals("failed", store.findTransactionById(forgedTxId)?.status)
+            assertTrue(store.passesForUser("u-forged").isEmpty(), "Forged callback must NEVER grant pass!")
+        }
+    }
+
+    @Test fun adminUserIntelligenceAndSubscribeEndpoints() = kotlinx.coroutines.runBlocking {
+        val store = InMemoryStore()
+        val user = store.signUp("+254711223344")
+        store.grantPass(user.userId, "o1")
+        store.insertTransaction(user.userId, null, "o1", 5.0, "KES", "checkout-sub-1")
+
+        testApplication {
+            application { relayModule(store, "secret-key") }
+            val c = createClient { install(ClientCNC) { json(Codec.json) } }
+
+            // GET /admin/api/users/{id}
+            val detailRes = c.get("/admin/api/users/${user.userId}") {
+                header("X-Admin-Key", "secret-key")
+            }
+            assertEquals(HttpStatusCode.OK, detailRes.status)
+            val detail: UserDetail = detailRes.body()
+            assertEquals(user.userId, detail.user.id)
+            assertEquals("+254711223344", detail.user.phone)
+            assertEquals("Pro Pass", detail.activePlan)
+            assertEquals(1, detail.passes.size)
+            assertEquals(1, detail.transactions.size)
+
+            // POST /api/subscribe
+            val subRes = c.post("/api/subscribe") {
+                header("X-Server-Key", "secret-key")
+                header("X-User-Id", user.userId)
+                contentType(ContentType.Application.Json)
+                setBody("""{"offerId":"o1"}""")
+            }
+            assertEquals(HttpStatusCode.OK, subRes.status)
+            val sub: SubscribeResponse = subRes.body()
+            assertTrue(sub.ok)
+            assertTrue(sub.checkoutRequestId.isNotBlank())
+
+            // GET /api/payments/status/{id}
+            val statusRes = c.get("/api/payments/status/${sub.transactionId}") {
+                header("X-Server-Key", "secret-key")
+            }
+            assertEquals(HttpStatusCode.OK, statusRes.status)
+            val statusTx: Transaction = statusRes.body()
+            assertEquals(sub.transactionId, statusTx.id)
+        }
     }
 
     @Test fun requestIdHeaderPresent() {
