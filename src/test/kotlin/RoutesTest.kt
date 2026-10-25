@@ -65,8 +65,9 @@ class RoutesTest {
 
     @Test fun authFlow() = runBlocking {
         val s = InMemoryStore()
+        val authLimiter = AuthRateLimiter(maxTokens = 20)
         testApplication {
-            application { relayModule(s, null) }
+            application { relayModule(s, null, authLimiter = authLimiter) }
             val c = createClient { }
             val up = c.post("/api/auth/sign-up") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2341"}""") }
             assertEquals(HttpStatusCode.OK, up.status)

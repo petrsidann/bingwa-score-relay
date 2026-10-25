@@ -80,7 +80,7 @@ class PostgresStore(
 
     override suspend fun signUp(phone: String) = withContext(Dispatchers.IO) {
         val t = Tokens("u-" + System.nanoTime(), phone, "at-" + System.nanoTime(), "rt-" + System.nanoTime(),
-            java.time.Instant.now().plusSeconds(3600).toString())
+            java.time.Instant.now().plusSeconds(12 * 3600).toString())
         c().prepareStatement("INSERT INTO users(user_id,phone,access_token,refresh_token,expires_at) VALUES(?,?,?,?,?)").apply {
             setString(1, t.userId); setString(2, t.phone); setString(3, t.accessToken); setString(4, t.refreshToken); setString(5, t.expiresAt)
         }.executeUpdate()
@@ -108,9 +108,13 @@ class PostgresStore(
         val old = c().prepareStatement("SELECT * FROM users WHERE refresh_token=?").apply { setString(1, refreshToken) }
             .executeQuery().let { rs -> if (rs.next()) Tokens(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)) else null }
         old?.let {
-            val t = it.copy(accessToken = "at-" + System.nanoTime(), refreshToken = "rt-" + System.nanoTime())
-            c().prepareStatement("UPDATE users SET access_token=?, refresh_token=? WHERE user_id=?").apply {
-                setString(1, t.accessToken); setString(2, t.refreshToken); setString(3, t.userId)
+            val t = it.copy(
+                accessToken = "at-" + System.nanoTime(),
+                refreshToken = "rt-" + System.nanoTime(),
+                expiresAt = java.time.Instant.now().plusSeconds(12 * 3600).toString()
+            )
+            c().prepareStatement("UPDATE users SET access_token=?, refresh_token=?, expires_at=? WHERE user_id=?").apply {
+                setString(1, t.accessToken); setString(2, t.refreshToken); setString(3, t.expiresAt); setString(4, t.userId)
             }.executeUpdate()
             t
         }
@@ -179,6 +183,26 @@ class PostgresStore(
             setString(1, passId); setString(2, featureId); setString(3, userId)
         }.executeUpdate()
         Pass(passId, featureId, userId, active = true)
+    }
+
+    override suspend fun passesForUser(userId: String): List<Pass> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id, feature_id, user_id, active FROM passes WHERE user_id=?").apply {
+            setString(1, userId)
+        }.executeQuery().let { rs ->
+            buildList {
+                while (rs.next()) add(Pass(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4)))
+            }
+        }
+    }
+
+    override suspend fun transactionsForUser(userId: String): List<Transaction> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT id, user_id, agent_slug, offer_id, amount, currency, status, checkout_request_id, created_at FROM transactions WHERE user_id=?").apply {
+            setString(1, userId)
+        }.executeQuery().let { rs ->
+            buildList {
+                while (rs.next()) add(Transaction(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9)))
+            }
+        }
     }
 
     override suspend fun transactions(status: String?): List<Transaction> = withContext(Dispatchers.IO) {

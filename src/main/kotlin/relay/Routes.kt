@@ -22,7 +22,12 @@ import io.ktor.websocket.Frame as WsFrame
 
 val bus = MutableSharedFlow<String>(extraBufferCapacity = 256)
 
-fun Application.relayModule(store: Store, serverKey: String?) {
+fun Application.relayModule(
+    store: Store,
+    serverKey: String?,
+    authLimiter: AuthRateLimiter = AuthRateLimiter(),
+    ipLimiter: GlobalIpRateLimiter = GlobalIpRateLimiter()
+) {
     install(ContentNegotiation) { json(Codec.json) }
     install(WebSockets) {
         pingPeriod = 12.seconds
@@ -31,11 +36,17 @@ fun Application.relayModule(store: Store, serverKey: String?) {
     install(SSE)
     installCors()
     installRequestLogging()
-    val authRateLimiter = RateLimitStub((env("RATE_LIMIT_AUTH_PER_MIN") ?: "30").toInt())
-    installAuthRateLimit(authRateLimiter)
+    installSecurityHeaders()
+    installAuthRateLimit(authLimiter, ipLimiter)
     install(StatusPages) {
         status(HttpStatusCode.NotFound) { call, _ ->
             call.respond(HttpStatusCode.NotFound, ApiError("not_found"))
+        }
+        exception<BadRequestException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+        }
+        exception<kotlinx.serialization.SerializationException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ApiError("invalid_json"))
         }
         exception<Throwable> { call, cause ->
             call.respond(HttpStatusCode.InternalServerError, ApiError(cause.message ?: "internal_error"))
@@ -72,6 +83,17 @@ fun Application.relayModule(store: Store, serverKey: String?) {
 
 fun Route.paymentsRoutes(store: Store) {
     route("/api/payments") {
+        get("/status/{id}") {
+            AdminState.count("GET /api/payments/status/{id}")
+            val id = call.parameters["id"] ?: ""
+            val tx = store.findTransactionById(id) ?: store.findTransactionByCheckoutId(id)
+            if (tx == null) {
+                call.respond(HttpStatusCode.NotFound, ApiError("transaction_not_found"))
+            } else {
+                call.respond(tx)
+            }
+        }
+
         post("/stk") {
             AdminState.count("POST /api/payments/stk")
             val bodyText = call.receiveText()
@@ -143,19 +165,39 @@ fun Route.paymentsRoutes(store: Store) {
                 ?: store.findTransactionById(checkoutId)
                 ?: return@post call.respond(HttpStatusCode.NotFound, ApiError("transaction_not_found"))
 
-            // Idempotency: if already processed (paid or failed), do not grant pass again
+            // Idempotency check
             if (tx.status == "paid" || tx.status == "failed") {
                 return@post call.respond(CallbackResponse(0, "Accepted (already processed)", alreadyProcessed = true))
             }
 
-            if (resultCode == 0) {
-                store.setTransactionStatus(tx.id, "paid")
-                store.grantPass(tx.userId ?: "anon", tx.offerId)
-            } else {
+            if (resultCode != 0) {
                 store.setTransactionStatus(tx.id, "failed")
+                AdminState.addAudit("payment.failed", "Callback indicated failure for ${tx.id}")
+                return@post call.respond(CallbackResponse(0, "Accepted (failed)"))
             }
 
-            call.respond(CallbackResponse(0, "Accepted"))
+            // Payment Proof Verification: Query Daraja API before granting pass!
+            val offer = store.offers().firstOrNull { it.id == tx.offerId }
+                ?: store.offersForAgent(tx.agentSlug ?: "").firstOrNull { it.id == tx.offerId }
+            val expectedPrice = offer?.price ?: tx.amount
+
+            val queryResult = MPesaService.queryTransactionStatus(checkoutId, expectedPrice)
+
+            val isResultCodeOk = queryResult.resultCode == 0
+            val isAmountMatch = queryResult.amount != null && Math.abs(queryResult.amount - expectedPrice) < 0.01
+            val isShortcodeMatch = queryResult.shortcode == MPesaService.shortcode
+
+            if (isResultCodeOk && isAmountMatch && isShortcodeMatch) {
+                store.setTransactionStatus(tx.id, "paid")
+                store.grantPass(tx.userId ?: "anon", tx.offerId)
+                AdminState.addAudit("payment.granted", "Pass granted for ${tx.id} (${tx.userId})")
+                call.respond(CallbackResponse(0, "Accepted"))
+            } else {
+                store.setTransactionStatus(tx.id, "failed")
+                val reason = "Mismatch: codeOk=$isResultCodeOk amountMatch=$isAmountMatch shortcodeMatch=$isShortcodeMatch"
+                AdminState.addAudit("payment.rejected", "Forged/invalid callback for ${tx.id}: $reason")
+                call.respond(HttpStatusCode.BadRequest, ApiError("payment_verification_failed"))
+            }
         }
     }
 }
@@ -266,9 +308,21 @@ fun Route.relayApi(store: Store) {
     }
     post("/auth/sign-in") {
         AdminState.count("POST /api/auth/sign-in")
-        val r = call.receive<OtpRequest>()
+        val r = try {
+            call.receive<OtpRequest>()
+        } catch (_: Exception) {
+            return@post call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+        }
+        val ip = call.request.local.remoteHost
+        val key = "$ip:${r.phone}"
         val t = store.signIn(r.phone)
-        if (t == null) call.respond(HttpStatusCode.Unauthorized, ApiError("unknown_user")) else call.respond(t)
+        if (t == null) {
+            globalAuthRateLimiter.recordFailure(key)
+            call.respond(HttpStatusCode.Unauthorized, ApiError("unknown_user"))
+        } else {
+            globalAuthRateLimiter.recordSuccess(key)
+            call.respond(t)
+        }
     }
     post("/auth/email-otp") {
         AdminState.count("POST /api/auth/email-otp")
@@ -279,14 +333,63 @@ fun Route.relayApi(store: Store) {
     post("/auth/verify-otp") {
         AdminState.count("POST /api/auth/verify-otp")
         val r = call.receive<OtpVerify>()
+        val ip = call.request.local.remoteHost
+        val key = "$ip:${r.phone}"
         val t = store.verifyOtp(r.phone, r.code)
-        if (t == null) call.respond(HttpStatusCode.Unauthorized, ApiError("bad_otp")) else call.respond(t)
+        if (t == null) {
+            globalAuthRateLimiter.recordFailure(key)
+            call.respond(HttpStatusCode.Unauthorized, ApiError("bad_otp"))
+        } else {
+            globalAuthRateLimiter.recordSuccess(key)
+            call.respond(t)
+        }
     }
     post("/auth/refresh") {
         AdminState.count("POST /api/auth/refresh")
         val r = call.receive<RefreshRequest>()
+        val ip = call.request.local.remoteHost
+        val key = "$ip:${r.refreshToken}"
         val t = store.refresh(r.refreshToken)
-        if (t == null) call.respond(HttpStatusCode.Unauthorized, ApiError("bad_refresh")) else call.respond(t)
+        if (t == null) {
+            globalAuthRateLimiter.recordFailure(key)
+            call.respond(HttpStatusCode.Unauthorized, ApiError("bad_refresh"))
+        } else {
+            globalAuthRateLimiter.recordSuccess(key)
+            call.respond(t)
+        }
+    }
+    post("/subscribe") {
+        AdminState.count("POST /api/subscribe")
+        val userId = call.request.headers["X-User-Id"]
+        val req = try { call.receive<SubscribeRequest>() } catch (_: Exception) {
+            return@post call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+        }
+        val offer = store.offers().firstOrNull { it.id == req.offerId }
+            ?: return@post call.respond(HttpStatusCode.NotFound, ApiError("offer_not_found"))
+
+        val phone = req.phone
+            ?: userId?.let { uid -> store.users().firstOrNull { it.id == uid }?.phone }
+            ?: "254700000000"
+
+        val stkResult = MPesaService.initiateStkPush(phone, offer.price, offer.id)
+        val txId = store.insertTransaction(
+            userId = userId,
+            agentSlug = null,
+            offerId = offer.id,
+            amount = offer.price,
+            currency = "KES",
+            checkoutRequestId = stkResult.checkoutRequestId
+        )
+
+        val status = if (MPesaService.isSandbox) {
+            store.setTransactionStatus(txId, "paid")
+            if (userId != null) store.grantPass(userId, offer.id)
+            "paid"
+        } else {
+            "pending"
+        }
+
+        call.respond(SubscribeResponse(ok = true, checkoutRequestId = stkResult.checkoutRequestId, transactionId = txId, status = status))
     }
 }
 

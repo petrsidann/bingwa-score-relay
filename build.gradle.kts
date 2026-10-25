@@ -30,7 +30,7 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-kotlin { jvmToolchain(17) }
+kotlin { jvmToolchain(21) }
 
 application { mainClass.set("relay.MainKt") }
 
