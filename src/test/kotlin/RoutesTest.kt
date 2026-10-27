@@ -310,4 +310,50 @@ class RoutesTest {
             assertEquals(HttpStatusCode.OK, c.get("/admin/api/transactions") { header("X-Admin-Key", "secret") }.status)
         }
     }
+
+    @Test fun adminPortalV3DashboardAndAssets() {
+        val s = InMemoryStore()
+        runBlocking {
+            s.signUp("+254711223344")
+            s.createAgent("agent-v3", "Agent V3 Store", "+254700112233")
+            val txId = s.insertTransaction("u-v3", "agent-v3", "o1", 500.0, "KES")
+            s.setTransactionStatus(txId, "paid")
+        }
+
+        testApplication {
+            application { relayModule(s, "secret") }
+            val c = createClient { }
+
+            // 1. GET /admin 200 html and CSP header present
+            val adminRes = c.get("/admin") { header("X-Admin-Key", "secret") }
+            assertEquals(HttpStatusCode.OK, adminRes.status)
+            assertTrue(adminRes.contentType()?.match(ContentType.Text.Html) == true)
+            val cspHeader = adminRes.headers["Content-Security-Policy"]
+            assertNotNull(cspHeader)
+            assertEquals("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'", cspHeader)
+
+            // 2. Asset routes app.css and app.js serve 200 OK with correct Content-Type
+            val cssRes = c.get("/admin/assets/app.css")
+            assertEquals(HttpStatusCode.OK, cssRes.status)
+            assertTrue(cssRes.contentType()?.match(ContentType.Text.CSS) == true)
+
+            val jsRes = c.get("/admin/assets/app.js")
+            assertEquals(HttpStatusCode.OK, jsRes.status)
+            assertTrue(jsRes.contentType()?.match(ContentType.Application.JavaScript) == true || jsRes.contentType()?.match(ContentType("text", "javascript")) == true)
+
+            // 3. GET /admin/api/overview returns seeded data, sparkline, and activity feed
+            val overviewRes = c.get("/admin/api/overview") { header("X-Admin-Key", "secret") }
+            assertEquals(HttpStatusCode.OK, overviewRes.status)
+            val overviewText = overviewRes.bodyAsText()
+            assertTrue(overviewText.contains("totalUsers"))
+            assertTrue(overviewText.contains("revenueThisWeekKsh"))
+            assertTrue(overviewText.contains("sparkline7d"))
+            assertTrue(overviewText.contains("activityFeed"))
+
+            // 4. GET /admin/api/agents returns store list
+            val agentsRes = c.get("/admin/api/agents") { header("X-Admin-Key", "secret") }
+            assertEquals(HttpStatusCode.OK, agentsRes.status)
+            assertTrue(agentsRes.bodyAsText().contains("agent-v3"))
+        }
+    }
 }

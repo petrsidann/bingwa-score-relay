@@ -229,6 +229,12 @@ class PostgresStore(
             .executeQuery().next()
     }
 
+    override suspend fun agents(): List<Agent> = withContext(Dispatchers.IO) {
+        c().prepareStatement("SELECT slug, name, owner_phone, active FROM agents").executeQuery().let { rs ->
+            buildList { while (rs.next()) add(Agent(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4))) }
+        }
+    }
+
     override suspend fun createAgent(slug: String, name: String, ownerPhone: String?): Boolean = withContext(Dispatchers.IO) {
         c().prepareStatement("INSERT INTO agents(slug,name,owner_phone) VALUES(?,?,?) ON CONFLICT (slug) DO NOTHING").apply {
             setString(1, slug); setString(2, name); ownerPhone?.let { setString(3, it) } ?: setNull(3, java.sql.Types.NULL)
