@@ -15,13 +15,41 @@ import kotlinx.serialization.Serializable
 @Serializable data class OkResult(val ok: Boolean)
 @Serializable data class OtpSent(val ok: Boolean, val devCode: String)
 @Serializable data class ApiError(val error: String)
-@Serializable data class AdminUser(val id: String, val phone: String, val createdAt: String, val status: String)
+@Serializable data class AdminUser(
+    val id: String,
+    val phone: String,
+    val createdAt: String,
+    val status: String,
+    val name: String? = null,
+    val business: String? = null,
+    val email: String? = null,
+    val plan: String = "Free",
+    val credits: Int = 0
+)
 
 @Serializable data class UserDetail(
     val user: AdminUser,
     val passes: List<Pass>,
     val transactions: List<Transaction>,
     val activePlan: String = "Free"
+)
+
+@Serializable data class ActivityItem(
+    val id: String,
+    val type: String, // "signup" or "payment"
+    val title: String,
+    val subtitle: String,
+    val amount: Double? = null,
+    val timestamp: String
+)
+
+@Serializable data class OverviewData(
+    val totalUsers: Int,
+    val activePlans: Int,
+    val transactionsToday: Int,
+    val revenueThisWeekKsh: Double,
+    val sparkline7d: List<Double>,
+    val activityFeed: List<ActivityItem>
 )
 
 @Serializable data class SubscribeRequest(val offerId: String, val phone: String? = null)
@@ -74,6 +102,7 @@ interface Store {
     suspend fun passesForUser(userId: String): List<Pass> = emptyList()
     suspend fun transactionsForUser(userId: String): List<Transaction> = emptyList()
     suspend fun transactions(status: String? = null): List<Transaction> = emptyList()
+    suspend fun agents(): List<Agent> = emptyList()
     fun close() {}
 }
 
@@ -199,4 +228,6 @@ class InMemoryStore : Store {
 
     override suspend fun transactions(status: String?): List<Transaction> =
         if (status.isNullOrBlank()) transactionsList.toList() else transactionsList.filter { it.status.equals(status, ignoreCase = true) }
+
+    override suspend fun agents(): List<Agent> = agents.values.toList()
 }
