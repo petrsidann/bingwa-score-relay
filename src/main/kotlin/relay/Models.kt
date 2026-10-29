@@ -15,6 +15,13 @@ import kotlinx.serialization.Serializable
 @Serializable data class OkResult(val ok: Boolean)
 @Serializable data class OtpSent(val ok: Boolean, val devCode: String)
 @Serializable data class ApiError(val error: String)
+@Serializable data class UpdateInfo(
+    val versionCode: Int,
+    val versionName: String,
+    val url: String,
+    val notes: String
+)
+
 @Serializable data class AdminUser(
     val id: String,
     val phone: String,
@@ -24,14 +31,16 @@ import kotlinx.serialization.Serializable
     val business: String? = null,
     val email: String? = null,
     val plan: String = "Free",
-    val credits: Int = 0
+    val credits: Int = 0,
+    val verifiedAt: String? = null
 )
 
 @Serializable data class UserDetail(
     val user: AdminUser,
     val passes: List<Pass>,
     val transactions: List<Transaction>,
-    val activePlan: String = "Free"
+    val activePlan: String = "Free",
+    val otp: String? = null
 )
 
 @Serializable data class ActivityItem(
@@ -89,6 +98,7 @@ interface Store {
     suspend fun refresh(refreshToken: String): Tokens?
     suspend fun users(): List<AdminUser> = emptyList()
     suspend fun setUserStatus(id: String, status: String): Boolean = false
+    suspend fun markUserVerified(id: String, verifiedAt: String): Boolean = false
     suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer? = null
     suspend fun setOfferVerified(id: String, verified: Boolean): Boolean = false
     suspend fun createAgent(slug: String, name: String, ownerPhone: String? = null): Boolean = false
@@ -136,9 +146,11 @@ class InMemoryStore : Store {
     }
     override suspend fun signIn(phone: String): Tokens? = users["u:$phone"]
     override suspend fun signUp(phone: String): Tokens {
+        val existing = users["u:$phone"]
+        if (existing != null) return existing
         val t = Tokens(next("u"), phone, next("at"), next("rt"), java.time.Instant.now().plusSeconds(12 * 3600).toString())
         users["u:$phone"] = t; users["rt:${t.refreshToken}"] = t
-        userMeta[t.userId] = AdminUser(t.userId, phone, java.time.Instant.now().toString(), "active")
+        userMeta[t.userId] = AdminUser(t.userId, phone, java.time.Instant.now().toString(), "pending_verification")
         return t
     }
     override suspend fun requestOtp(phone: String): String {
@@ -164,6 +176,12 @@ class InMemoryStore : Store {
     override suspend fun setUserStatus(id: String, status: String): Boolean {
         val u = userMeta[id] ?: return false
         userMeta[id] = u.copy(status = status); return true
+    }
+
+    override suspend fun markUserVerified(id: String, verifiedAt: String): Boolean {
+        val u = userMeta[id] ?: return false
+        userMeta[id] = u.copy(status = "active", verifiedAt = verifiedAt)
+        return true
     }
 
     override suspend fun createOffer(title: String, price: Double, verified: Boolean): Offer {

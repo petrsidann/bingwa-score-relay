@@ -22,8 +22,10 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_token TEXT,
     expires_at    TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status        TEXT NOT NULL DEFAULT 'active'   -- active | suspended | deleted
+    status        TEXT NOT NULL DEFAULT 'pending_verification',   -- pending_verification | active | suspended | deleted
+    verified_at   TIMESTAMPTZ
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS otps (
     phone      TEXT PRIMARY KEY,

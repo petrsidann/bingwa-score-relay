@@ -56,6 +56,15 @@ fun Application.relayModule(
     routing {
         get("/healthz") { AdminState.count("GET /healthz"); call.respondText("ok") }
 
+        get("/updates/latest.json") {
+            AdminState.count("GET /updates/latest.json")
+            val versionCode = env("UPDATE_VERSION_CODE")?.toIntOrNull() ?: 100
+            val versionName = env("UPDATE_VERSION_NAME") ?: "1.0.0"
+            val url = env("UPDATE_URL") ?: "https://example.com/app.apk"
+            val notes = env("UPDATE_NOTES") ?: "Initial release"
+            call.respond(UpdateInfo(versionCode, versionName, url, notes))
+        }
+
         route("/api") {
             if (serverKey != null) {
                 // Route-level interceptor guards every /api/* call (except public webhook callbacks); finish() halts the pipeline.
@@ -301,11 +310,95 @@ fun Route.relayApi(store: Store) {
         bus.tryEmit(encodeFrame("message.sent", Codec.json.encodeToJsonElement(Message.serializer(), m)))
         call.respond(SendResult(true, m.id))
     }
-    post("/auth/sign-up") {
-        AdminState.count("POST /api/auth/sign-up")
-        val r = call.receive<OtpRequest>()
-        call.respond(store.signUp(r.phone))
+    // Sign Up & OTP endpoints
+    val signupRoute: RoutingHandler = {
+        AdminState.count("POST /api/auth/signup")
+        val r = try {
+            call.receive<OtpRequest>()
+        } catch (_: Exception) {
+            null
+        }
+        if (r == null) {
+            call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+        } else {
+            val userTokens = store.signUp(r.phone)
+            val userObj = store.users().firstOrNull { it.phone == r.phone }
+            if (userObj?.status == "active") {
+                call.respond(userTokens)
+            } else {
+                when (val gen = OtpManager.generateOtp(r.phone)) {
+                    is OtpGenResult.Success -> {
+                        call.respond(userTokens)
+                    }
+                    is OtpGenResult.Cooldown -> {
+                        call.respond(HttpStatusCode.TooManyRequests, ApiError("resend_cooldown_${gen.remainingSec}s"))
+                    }
+                    is OtpGenResult.Locked -> {
+                        call.respond(HttpStatusCode.Forbidden, ApiError("account_locked_${gen.remainingSec}s"))
+                    }
+                }
+            }
+        }
     }
+
+    post("/auth/signup", signupRoute)
+    post("/auth/sign-up", signupRoute)
+
+    // Verify OTP endpoints
+    val verifyRoute: RoutingHandler = {
+        AdminState.count("POST /api/auth/verify")
+        val r = try {
+            call.receive<OtpVerify>()
+        } catch (_: Exception) {
+            null
+        }
+        if (r == null) {
+            call.respond(HttpStatusCode.BadRequest, ApiError("invalid_request"))
+        } else {
+            val ip = call.request.local.remoteHost
+            val key = "$ip:${r.phone}"
+            when (val res = OtpManager.verifyOtp(r.phone, r.code)) {
+                is OtpVerifyResult.Success -> {
+                    globalAuthRateLimiter.recordSuccess(key)
+                    val now = java.time.Instant.now().toString()
+                    val userObj = store.users().firstOrNull { it.phone == r.phone }
+                    if (userObj != null) {
+                        store.markUserVerified(userObj.id, now)
+                    }
+                    val tokens = store.signIn(r.phone) ?: store.signUp(r.phone).also { store.markUserVerified(it.userId, now) }
+                    call.respond(tokens)
+                }
+                is OtpVerifyResult.InvalidCode -> {
+                    globalAuthRateLimiter.recordFailure(key)
+                    call.respond(HttpStatusCode.Unauthorized, ApiError("invalid_code_${res.attemptsLeft}_attempts_left"))
+                }
+                is OtpVerifyResult.Expired -> {
+                    globalAuthRateLimiter.recordFailure(key)
+                    call.respond(HttpStatusCode.Unauthorized, ApiError("otp_expired"))
+                }
+                is OtpVerifyResult.Locked -> {
+                    globalAuthRateLimiter.recordFailure(key)
+                    call.respond(HttpStatusCode.Forbidden, ApiError("account_locked_${res.remainingSec}s"))
+                }
+                is OtpVerifyResult.NotFound -> {
+                    val fallback = store.verifyOtp(r.phone, r.code)
+                    if (fallback != null) {
+                        globalAuthRateLimiter.recordSuccess(key)
+                        val now = java.time.Instant.now().toString()
+                        store.markUserVerified(fallback.userId, now)
+                        call.respond(fallback)
+                    } else {
+                        globalAuthRateLimiter.recordFailure(key)
+                        call.respond(HttpStatusCode.Unauthorized, ApiError("invalid_code"))
+                    }
+                }
+            }
+        }
+    }
+
+    post("/auth/verify", verifyRoute)
+    post("/auth/verify-otp", verifyRoute)
+
     post("/auth/sign-in") {
         AdminState.count("POST /api/auth/sign-in")
         val r = try {
@@ -315,6 +408,15 @@ fun Route.relayApi(store: Store) {
         }
         val ip = call.request.local.remoteHost
         val key = "$ip:${r.phone}"
+        val userObj = store.users().firstOrNull { it.phone == r.phone }
+        if (userObj == null) {
+            globalAuthRateLimiter.recordFailure(key)
+            return@post call.respond(HttpStatusCode.Unauthorized, ApiError("unknown_user"))
+        }
+        if (userObj.status == "pending_verification") {
+            globalAuthRateLimiter.recordFailure(key)
+            return@post call.respond(HttpStatusCode.Forbidden, ApiError("VERIFICATION_REQUIRED"))
+        }
         val t = store.signIn(r.phone)
         if (t == null) {
             globalAuthRateLimiter.recordFailure(key)
@@ -324,24 +426,14 @@ fun Route.relayApi(store: Store) {
             call.respond(t)
         }
     }
+
     post("/auth/email-otp") {
         AdminState.count("POST /api/auth/email-otp")
         val r = call.receive<OtpRequest>()
-        val code = store.requestOtp(r.phone)
-        call.respond(OtpSent(true, code))
-    }
-    post("/auth/verify-otp") {
-        AdminState.count("POST /api/auth/verify-otp")
-        val r = call.receive<OtpVerify>()
-        val ip = call.request.local.remoteHost
-        val key = "$ip:${r.phone}"
-        val t = store.verifyOtp(r.phone, r.code)
-        if (t == null) {
-            globalAuthRateLimiter.recordFailure(key)
-            call.respond(HttpStatusCode.Unauthorized, ApiError("bad_otp"))
-        } else {
-            globalAuthRateLimiter.recordSuccess(key)
-            call.respond(t)
+        when (val gen = OtpManager.generateOtp(r.phone)) {
+            is OtpGenResult.Success -> call.respond(OtpSent(true, gen.code))
+            is OtpGenResult.Cooldown -> call.respond(HttpStatusCode.TooManyRequests, ApiError("resend_cooldown_${gen.remainingSec}s"))
+            is OtpGenResult.Locked -> call.respond(HttpStatusCode.Forbidden, ApiError("account_locked_${gen.remainingSec}s"))
         }
     }
     post("/auth/refresh") {
