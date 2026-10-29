@@ -251,6 +251,8 @@ async function renderUsers(el) {
       const tr = document.createElement('tr');
       tr.style.cursor = 'pointer';
       const active = u.status === 'active';
+      const isPending = u.status === 'pending_verification';
+      const statusBadgeClass = active ? 'badge-ok' : (isPending ? 'badge-pending' : 'badge-failed');
       tr.innerHTML =
         '<td style="font-weight:600; color:var(--text-primary);">' + esc(u.name || u.id) + '</td>' +
         '<td>' + esc(u.business || '—') + '</td>' +
@@ -259,7 +261,7 @@ async function renderUsers(el) {
         '<td><span class="badge badge-ok">' + esc(u.plan || 'Free') + '</span></td>' +
         '<td class="num">' + Number(u.credits || 0) + '</td>' +
         '<td class="text-subtle">' + esc((u.createdAt || '').slice(0, 10) || 'Today') + '</td>' +
-        '<td><span class="badge ' + (active ? 'badge-ok' : 'badge-failed') + '"><span class="dot"></span>' + esc(u.status) + '</span></td>';
+        '<td><span class="badge ' + statusBadgeClass + '"><span class="dot"></span>' + esc(u.status) + '</span></td>';
 
       tr.addEventListener('click', () => openUserDrawer(u.id));
       tbody.appendChild(tr);
@@ -285,6 +287,9 @@ async function openUserDrawer(userId) {
     const txs = detail.transactions || [];
     const isActive = u.status === 'active';
 
+    const isPending = u.status === 'pending_verification';
+    const statusBadgeClass = isActive ? 'badge-ok' : (isPending ? 'badge-pending' : 'badge-failed');
+
     body.innerHTML =
       '<div class="card" style="padding:16px; display:flex; flex-direction:column; gap:8px;">' +
         '<p class="t-micro">Identity Profile</p>' +
@@ -294,7 +299,9 @@ async function openUserDrawer(userId) {
         '<p class="t-body"><strong>Phone (Full):</strong> <code class="num">' + esc(u.phone) + '</code></p>' +
         '<p class="t-body"><strong>Email:</strong> ' + esc(u.email || 'N/A') + '</p>' +
         '<p class="t-body"><strong>Plan:</strong> <span class="badge badge-ok">' + esc(detail.activePlan || u.plan) + '</span></p>' +
-        '<p class="t-body"><strong>Status:</strong> <span class="badge ' + (isActive ? 'badge-ok' : 'badge-failed') + '">' + esc(u.status) + '</span></p>' +
+        '<p class="t-body"><strong>Status:</strong> <span class="badge ' + statusBadgeClass + '">' + esc(u.status) + '</span></p>' +
+        (u.verifiedAt ? '<p class="t-body"><strong>Verified At:</strong> ' + esc(u.verifiedAt) + '</p>' : '') +
+        (detail.otp ? '<p class="t-body" style="background:var(--bg-canvas); padding:8px; border-radius:var(--radius-sm);"><strong>Active OTP (Sandbox):</strong> <code class="num" style="font-size:16px; font-weight:bold; color:var(--brand-blue);">' + esc(detail.otp) + '</code></p>' : '') +
         '<div style="margin-top:8px;">' +
           '<button id="toggle-user-btn" class="btn ' + (isActive ? 'btn-danger' : 'btn-success') + ' w-full">' +
             (isActive ? 'Disable User Account' : 'Reactivate User Account') +

@@ -159,7 +159,8 @@ fun Application.adminRoutes(store: Store, serverKey: String?) {
                         val passes = store.passesForUser(id)
                         val txs = store.transactionsForUser(id)
                         val activePlan = if (passes.isNotEmpty()) "Pro Pass" else "Free"
-                        call.respond(UserDetail(user = user, passes = passes, transactions = txs, activePlan = activePlan))
+                        val sandboxOtp = OtpManager.getSandboxOtp(user.phone)
+                        call.respond(UserDetail(user = user, passes = passes, transactions = txs, activePlan = activePlan, otp = sandboxOtp))
                     }
                 }
                 get("/metrics/history") {

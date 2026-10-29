@@ -79,9 +79,11 @@ class PostgresStore(
     }
 
     override suspend fun signUp(phone: String) = withContext(Dispatchers.IO) {
+        val existing = signIn(phone)
+        if (existing != null) return@withContext existing
         val t = Tokens("u-" + System.nanoTime(), phone, "at-" + System.nanoTime(), "rt-" + System.nanoTime(),
             java.time.Instant.now().plusSeconds(12 * 3600).toString())
-        c().prepareStatement("INSERT INTO users(user_id,phone,access_token,refresh_token,expires_at) VALUES(?,?,?,?,?)").apply {
+        c().prepareStatement("INSERT INTO users(user_id,phone,access_token,refresh_token,expires_at,status) VALUES(?,?,?,?,?,'pending_verification')").apply {
             setString(1, t.userId); setString(2, t.phone); setString(3, t.accessToken); setString(4, t.refreshToken); setString(5, t.expiresAt)
         }.executeUpdate()
         t
@@ -121,14 +123,20 @@ class PostgresStore(
     }
 
     override suspend fun users(): List<AdminUser> = withContext(Dispatchers.IO) {
-        c().prepareStatement("SELECT user_id, phone, created_at, status FROM users").executeQuery().let { rs ->
-            buildList { while (rs.next()) add(AdminUser(rs.getString(1), rs.getString(2), rs.getString(3) ?: "", rs.getString(4) ?: "active")) }
+        c().prepareStatement("SELECT user_id, phone, created_at, status, verified_at FROM users").executeQuery().let { rs ->
+            buildList { while (rs.next()) add(AdminUser(rs.getString(1), rs.getString(2), rs.getString(3) ?: "", rs.getString(4) ?: "pending_verification", verifiedAt = rs.getString(5))) }
         }
     }
 
     override suspend fun setUserStatus(id: String, status: String): Boolean = withContext(Dispatchers.IO) {
         c().prepareStatement("UPDATE users SET status=? WHERE user_id=?").apply {
             setString(1, status); setString(2, id)
+        }.executeUpdate() > 0
+    }
+
+    override suspend fun markUserVerified(id: String, verifiedAt: String): Boolean = withContext(Dispatchers.IO) {
+        c().prepareStatement("UPDATE users SET status='active', verified_at=?::timestamptz WHERE user_id=?").apply {
+            setString(1, verifiedAt); setString(2, id)
         }.executeUpdate() > 0
     }
 

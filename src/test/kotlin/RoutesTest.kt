@@ -67,25 +67,155 @@ class RoutesTest {
         val s = InMemoryStore()
         val authLimiter = AuthRateLimiter(maxTokens = 20)
         testApplication {
-            application { relayModule(s, null, authLimiter = authLimiter) }
+            application { relayModule(s, "secret", authLimiter = authLimiter) }
             val c = createClient { }
-            val up = c.post("/api/auth/sign-up") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2341"}""") }
+            val up = c.post("/api/auth/sign-up") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2341"}""") }
             assertEquals(HttpStatusCode.OK, up.status)
             val body = up.bodyAsText()
             assertTrue(body.contains("accessToken") && body.contains("refreshToken") && body.contains("expiresAt") && body.contains("userId") && body.contains("phone"))
             val rt = Regex("\"refreshToken\":\"([^\"]+)\"").find(body)!!.groupValues[1]
-            val in_ = c.post("/api/auth/sign-in") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2341"}""") }
+            val uid1 = Regex("\"userId\":\"([^\"]+)\"").find(body)!!.groupValues[1]
+            val detail1Raw = c.get("/admin/api/users/$uid1") { header("X-Admin-Key", "secret") }
+            val otp1 = Regex("\"otp\":\"([^\"]+)\"").find(detail1Raw.bodyAsText())!!.groupValues[1]
+            val ver1 = c.post("/api/auth/verify-otp") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2341","code":"$otp1"}""") }
+            assertEquals(HttpStatusCode.OK, ver1.status)
+            val in_ = c.post("/api/auth/sign-in") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2341"}""") }
             assertEquals(HttpStatusCode.OK, in_.status)
-            val otp = c.post("/api/auth/email-otp") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2342"}""") }
+            val otp = c.post("/api/auth/email-otp") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2342"}""") }
             val code = Regex("\"devCode\":\"([^\"]+)\"").find(otp.bodyAsText())!!.groupValues[1]
-            val ver = c.post("/api/auth/verify-otp") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2342","code":"$code"}""") }
+            val ver = c.post("/api/auth/verify-otp") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2342","code":"$code"}""") }
             assertEquals(HttpStatusCode.OK, ver.status)
-            val bad = c.post("/api/auth/verify-otp") { contentType(ContentType.Application.Json); setBody("""{"phone":"+2342","code":"000000"}""") }
+            val bad = c.post("/api/auth/verify-otp") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"phone":"+2342","code":"000000"}""") }
             assertEquals(HttpStatusCode.Unauthorized, bad.status)
-            val ref = c.post("/api/auth/refresh") { contentType(ContentType.Application.Json); setBody("""{"refreshToken":"$rt"}""") }
+            val ref = c.post("/api/auth/refresh") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"refreshToken":"$rt"}""") }
             assertEquals(HttpStatusCode.OK, ref.status)
-            val refBad = c.post("/api/auth/refresh") { contentType(ContentType.Application.Json); setBody("""{"refreshToken":"zz"}""") }
+            val refBad = c.post("/api/auth/refresh") { header("X-Server-Key", "secret"); contentType(ContentType.Application.Json); setBody("""{"refreshToken":"zz"}""") }
             assertEquals(HttpStatusCode.Unauthorized, refBad.status)
+        }
+    }
+
+    @Test fun stage32OtpAndUpdates() = runBlocking {
+        OtpManager.clear()
+        val s = InMemoryStore()
+        val authLimiter = AuthRateLimiter(maxTokens = 20)
+        testApplication {
+            application { relayModule(s, "secret", authLimiter = authLimiter) }
+            val c = createClient { install(ClientCNC) { json(Codec.json) } }
+
+            // 1) Updates endpoint contract check
+            val updatesRes = c.get("/updates/latest.json")
+            assertEquals(HttpStatusCode.OK, updatesRes.status)
+            val updateInfo = updatesRes.body<UpdateInfo>()
+            assertEquals(100, updateInfo.versionCode)
+            assertEquals("1.0.0", updateInfo.versionName)
+            assertEquals("https://example.com/app.apk", updateInfo.url)
+            assertEquals("Initial release", updateInfo.notes)
+
+            // 2) Sign-up creates status=pending_verification
+            val phone = "+254712345678"
+            val signupRes = c.post("/api/auth/signup") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone"}""")
+            }
+            assertEquals(HttpStatusCode.OK, signupRes.status)
+
+            val users = s.users()
+            val createdUser = users.first { it.phone == phone }
+            assertEquals("pending_verification", createdUser.status)
+            assertNull(createdUser.verifiedAt)
+
+            // Unverified login => 403 VERIFICATION_REQUIRED
+            val unverifiedLogin = c.post("/api/auth/sign-in") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone"}""")
+            }
+            assertEquals(HttpStatusCode.Forbidden, unverifiedLogin.status)
+            assertTrue(unverifiedLogin.bodyAsText().contains("VERIFICATION_REQUIRED"))
+
+            // Resend cooldown check (within 60s)
+            val resendCooldown = c.post("/api/auth/signup") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone"}""")
+            }
+            assertEquals(HttpStatusCode.TooManyRequests, resendCooldown.status)
+            assertTrue(resendCooldown.bodyAsText().contains("resend_cooldown"))
+
+            // Get sandbox OTP from Admin API
+            val adminUserDetail = c.get("/admin/api/users/${createdUser.id}") { header("X-Admin-Key", "secret") }.body<UserDetail>()
+            val activeOtp = adminUserDetail.otp
+            assertNotNull(activeOtp)
+            assertEquals(6, activeOtp.length)
+
+            // 3) Verify with bad code decreases attempts left
+            val badCodeRes = c.post("/api/auth/verify") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone","code":"000000"}""")
+            }
+            assertEquals(HttpStatusCode.Unauthorized, badCodeRes.status)
+            assertTrue(badCodeRes.bodyAsText().contains("attempts_left"))
+
+            // 4) Verify with valid code marks user verified
+            val verifyRes = c.post("/api/auth/verify") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone","code":"$activeOtp"}""")
+            }
+            assertEquals(HttpStatusCode.OK, verifyRes.status)
+            val tokens = verifyRes.body<Tokens>()
+            assertEquals(phone, tokens.phone)
+
+            val verifiedUser = s.users().first { it.phone == phone }
+            assertEquals("active", verifiedUser.status)
+            assertNotNull(verifiedUser.verifiedAt)
+
+            // Verified user login succeeds
+            val verifiedLogin = c.post("/api/auth/sign-in") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$phone"}""")
+            }
+            assertEquals(HttpStatusCode.OK, verifiedLogin.status)
+
+            // 5) Test Lockout after 5 wrong codes on new phone
+            val lockPhone = "+254799999999"
+            c.post("/api/auth/signup") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$lockPhone"}""")
+            }
+            for (i in 1..4) {
+                val badTry = c.post("/api/auth/verify") {
+                    header("X-Server-Key", "secret")
+                    contentType(ContentType.Application.Json)
+                    setBody("""{"phone":"$lockPhone","code":"000000"}""")
+                }
+                assertEquals(HttpStatusCode.Unauthorized, badTry.status)
+            }
+            // 5th wrong code triggers 15min lockout
+            val fifthTry = c.post("/api/auth/verify") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$lockPhone","code":"000000"}""")
+            }
+            assertEquals(HttpStatusCode.Forbidden, fifthTry.status)
+            assertTrue(fifthTry.bodyAsText().contains("account_locked"))
+
+            // 6) OTP Expiry test
+            val expirePhone = "+254788888888"
+            c.post("/api/auth/signup") {
+                header("X-Server-Key", "secret")
+                contentType(ContentType.Application.Json)
+                setBody("""{"phone":"$expirePhone"}""")
+            }
+            val expUser = s.users().first { it.phone == expirePhone }
+            val expOtp = c.get("/admin/api/users/${expUser.id}") { header("X-Admin-Key", "secret") }.body<UserDetail>().otp!!
+            // verify with simulated past time (+11 min)
+            val expiredResult = OtpManager.verifyOtp(expirePhone, expOtp, nowMs = System.currentTimeMillis() + 11 * 60 * 1000)
+            assertTrue(expiredResult is OtpVerifyResult.Expired)
         }
     }
 
